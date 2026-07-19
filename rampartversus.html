@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <title>Rampart Versus</title>
 <style>
-  html,body{margin:0;padding:0;background:#1B1B22;overflow:hidden;width:100%;height:100%;
+  html,body{margin:0;padding:0;background:#0E0E14;overflow:hidden;width:100%;height:100%;
     display:flex;align-items:center;justify-content:center;font-family:monospace;}
-  canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#1B1B22;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#0E0E14;}
 </style>
 </head>
 <body>
@@ -19,11 +19,12 @@
 const TILE=20, COLS=48, ROWS=30, HUD_H=64, FIELD_W=960, FIELD_H=600;
 const LAND=0, WATER=1, ROCK=2, WALL=3, CASTLE=4, CANNON=5;
 const PAL = {
-  normal:{ p1wall:"#3A6EA5", p1tint:"rgba(90,140,200,0.25)", p2wall:"#A53A3A", p2tint:"rgba(220,120,120,0.25)" },
-  cb:    { p1wall:"#2C7BB6", p1tint:"rgba(44,123,182,0.25)", p2wall:"#E66101", p2tint:"rgba(230,97,1,0.25)" }
+  normal:{ p1wall:"#49B6E0", p1glow:"#8FE4FF", p1tint:"rgba(73,182,224,0.22)", p2wall:"#F2843C", p2glow:"#FFC078", p2tint:"rgba(242,132,60,0.22)" },
+  cb:    { p1wall:"#3EA0DE", p1glow:"#9FD8FF", p1tint:"rgba(62,160,222,0.22)", p2wall:"#F5A21E", p2glow:"#FFD27A", p2tint:"rgba(245,162,30,0.22)" }
 };
-const COL_LAND=["#C9B27C","#BFA872","#D2BB86"], COL_WATER="#2E5E6E", COL_WATER2="#3A7285",
-      COL_ROCK="#6E6E64", COL_CASTLE="#8A8A8A", COL_TEXT="#F2EFE4", COL_BG="#1B1B22";
+const COL_LAND=["#D8BE86","#CDB177","#E0C793"], COL_WATER="#1B7A8C", COL_WATER2="#2596A9",
+      COL_ROCK="#5A574E", COL_ROCK_HI="#6E6A5E", COL_CASTLE="#9A958C", COL_CASTLE_HI="#B4AFA4",
+      COL_TEXT="#F5F1E6", COL_BG="#0E0E14";
 
 /* =========================================================================
    MAP DATA
@@ -123,7 +124,7 @@ function freshG(){
     board:null,
     players:[ newPlayer(1), newPlayer(2) ],
     balls:[], balloons:[],
-    fx:{ particles:[], shakeMs:0, shakeMag:0 },
+    fx:{ particles:[], shakeMs:0, shakeMag:0, flashMs:0, flashMax:1, pops:[] },
     pauseFrom:null,
     remap:{ playerIdx:0, actionIdx:0 },
     joinDone:false
@@ -475,6 +476,7 @@ function commitPlacement(P){
   for(const [x,y] of pieceCellsAbs(P, P.piece.cur.cells)){
     G.board.tiles[idx(x,y)] = WALL;
     G.board.wallOwner[idx(x,y)] = P.id;
+    G.fx.pops.push({ x, y, t:0, life:160, owner:P.id });
   }
   computeEnclosure(G.board);
   P.piece.canHold = true;
@@ -590,7 +592,19 @@ function resolveImpact(b){
   }
   G.fx.shakeMs = b.isSuper ? 250 : 100;
   G.fx.shakeMag = b.isSuper ? 10 : 4;
+  if(hitSomething){
+    G.fx.flashMs = b.isSuper ? 160 : 90;
+    G.fx.flashMax = G.fx.flashMs;
+    spawnBurst(b.x1, b.y1, b.isSuper);
+  }
   computeEnclosure(G.board);
+}
+function spawnBurst(x,y,big){
+  const n = big?18:10;
+  for(let i=0;i<n;i++){
+    const a=Math.random()*Math.PI*2, sp=(big?200:120)*(0.4+Math.random());
+    G.fx.particles.push({ x, y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp-40, life:big?520:360, t:0, hot:true });
+  }
 }
 function spawnParticles(x,y){
   for(let i=0;i<8;i++){
@@ -1011,6 +1025,10 @@ function cannonFootprintLegal(P,c){
    ========================================================================= */
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
+// offscreen "bright" layer for bloom: draw glowing things here, blur, composite additively
+const glowCanvas = document.createElement("canvas");
+glowCanvas.width=960; glowCanvas.height=664;
+const gctx = glowCanvas.getContext("2d");
 
 function resize(){
   const scale = Math.min(window.innerWidth/960, window.innerHeight/664);
@@ -1048,6 +1066,9 @@ function step(dtMs){
     for(const c of G.board.cannons) if(c.reloadMs>0) c.reloadMs -= dtMs;
     for(let i=0;i<G.board.scorch.length;i++) if(G.board.scorch[i]>0) {} // cosmetic decay omitted for perf
     if(G.fx.shakeMs>0) G.fx.shakeMs -= dtMs;
+    if(G.fx.flashMs>0) G.fx.flashMs -= dtMs;
+    for(const p of G.fx.pops) p.t += dtMs;
+    G.fx.pops = G.fx.pops.filter(p=>p.t<p.life);
     updateParticles(dtMs);
   }
   updateMusic(dtMs);
@@ -1115,21 +1136,89 @@ function renderMatch(){
   drawFx();
   drawPhaseSpecific();
   ctx.restore();
+  // --- BLOOM: draw bright things to an offscreen layer, blur it, add it back on top ---
+  buildGlowLayer();
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  ctx.filter = "blur(6px)";
+  ctx.drawImage(glowCanvas, 0, 0);
+  ctx.filter = "none";
+  ctx.restore();
   drawHUD();
+  drawOverlay();
 }
+// The "bright-pass": only glowing elements go here, in the same board space as drawFx.
+function buildGlowLayer(){
+  gctx.clearRect(0,0,960,664);
+  gctx.save();
+  gctx.translate(0, HUD_H);
+  const pal = G.settings.colorblind ? PAL.cb : PAL.normal;
+  for(const c of G.board.cannons){
+    const cx=c.x*TILE+TILE, cy=c.y*TILE+TILE;
+    gctx.fillStyle = c.type==="super" ? "#FFE9A0" : (c.owner===1?pal.p1glow:pal.p2glow);
+    gctx.beginPath(); gctx.arc(cx,cy,TILE*0.5,0,Math.PI*2); gctx.fill();
+  }
+  for(const b of G.balls){
+    const g=ballPos(b,b.t/b.T);
+    gctx.fillStyle = b.isSuper?"#FFE9A0":"#FFFDF2";
+    gctx.beginPath(); gctx.arc(g.x,g.y,b.isSuper?8:5,0,Math.PI*2); gctx.fill();
+  }
+  for(const p of G.fx.particles){ if(!p.hot) continue; const a=1-p.t/p.life;
+    gctx.fillStyle="rgba(255,200,120,"+a+")"; gctx.fillRect(p.x-2,p.y-2,5,5); }
+  for(const p of G.fx.pops){ const a=1-p.t/p.life;
+    gctx.fillStyle = p.owner===1?pal.p1glow:pal.p2glow; gctx.globalAlpha=a*0.7;
+    gctx.fillRect(p.x*TILE,p.y*TILE,TILE,TILE); gctx.globalAlpha=1; }
+  for(const c of G.board.castles){ if(!c.enclosedBy) continue;
+    gctx.fillStyle = c.enclosedBy===1?pal.p1glow:pal.p2glow;
+    gctx.fillRect(c.x*TILE+1.4*TILE-2, c.y*TILE-12, 14, 8); }
+  gctx.restore();
+}
+// CRT-ish finishing layer: vignette, faint scanlines, and the impact flash.
+function drawOverlay(){
+  const g = ctx.createRadialGradient(480,332,200,480,332,560);
+  g.addColorStop(0,"rgba(0,0,0,0)"); g.addColorStop(1,"rgba(0,0,0,0.45)");
+  ctx.fillStyle=g; ctx.fillRect(0,0,960,664);
+  ctx.fillStyle="rgba(0,0,0,0.06)";
+  for(let y=0;y<664;y+=3) ctx.fillRect(0,y,960,1);
+  if(G.fx.flashMs>0){
+    ctx.fillStyle="rgba(255,245,220,"+(0.5*G.fx.flashMs/G.fx.flashMax)+")";
+    ctx.fillRect(0,0,960,664);
+  }
+}
+// lighten(amt>0)/darken(amt<0) a #rrggbb hex toward white/black by |amt| (0..1)
+function shade(hex, amt){
+  const n=parseInt(hex.slice(1),16); let r=(n>>16)&255,g=(n>>8)&255,b=n&255;
+  const f=amt<0?0:255, p=Math.abs(amt);
+  r=Math.round(r+(f-r)*p); g=Math.round(g+(f-g)*p); b=Math.round(b+(f-b)*p);
+  return "rgb("+r+","+g+","+b+")";
+}
+function isWallOwner(b,x,y,o){ return inBounds(x,y) && b.tiles[idx(x,y)]===WALL && b.wallOwner[idx(x,y)]===o; }
+
 function drawBoard(){
   const b=G.board;
   const pal = G.settings.colorblind ? PAL.cb : PAL.normal;
+  const now = performance.now();
+  // terrain
   for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
-    const t=b.tiles[idx(x,y)];
-    let color;
-    if(t===WATER){ color = (Math.floor(performance.now()/400)%2===0)?COL_WATER:COL_WATER2; }
-    else if(t===ROCK){ color=COL_ROCK; }
-    else { color = COL_LAND[(x*7+y*13)%3]; }
-    ctx.fillStyle=color;
-    ctx.fillRect(x*TILE,y*TILE,TILE,TILE);
+    const px=x*TILE, py=y*TILE, t=b.tiles[idx(x,y)];
+    if(t===WATER){
+      // wavy two-tone: phase varies per tile so the surface ripples instead of blinking as one block
+      const wave = Math.sin((x*0.6 + y*0.35) + now/500);
+      ctx.fillStyle = wave>0 ? COL_WATER2 : COL_WATER;
+      ctx.fillRect(px,py,TILE,TILE);
+      if(wave>0.75){ ctx.fillStyle="rgba(255,255,255,0.14)"; ctx.fillRect(px+3,py+TILE*0.5,TILE-6,2); }
+    } else if(t===ROCK){
+      ctx.fillStyle=COL_ROCK; ctx.fillRect(px,py,TILE,TILE);
+      ctx.fillStyle=COL_ROCK_HI; ctx.fillRect(px,py,TILE,3); ctx.fillRect(px,py,3,TILE);
+      ctx.fillStyle="rgba(0,0,0,0.25)"; ctx.fillRect(px,py+TILE-3,TILE,3); ctx.fillRect(px+TILE-3,py,3,TILE);
+    } else {
+      ctx.fillStyle = COL_LAND[(x*7+y*13)%3];
+      ctx.fillRect(px,py,TILE,TILE);
+      // faint checker dither so the sand has texture instead of reading as flat blocks
+      if((x+y)&1){ ctx.fillStyle="rgba(0,0,0,0.05)"; ctx.fillRect(px,py,TILE,TILE); }
+    }
   }
-  // territory tint
+  // territory tint + scorch
   for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
     const i=idx(x,y);
     if(!b.outside[i] && !isSolid(b.tiles[i])){
@@ -1138,47 +1227,89 @@ function drawBoard(){
       if(p1){ ctx.fillStyle=pal.p1tint; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
       else if(p2){ ctx.fillStyle=pal.p2tint; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
     }
-    if(b.scorch[i]>0){ ctx.fillStyle="rgba(30,20,10,0.4)"; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
+    if(b.scorch[i]>0){ ctx.fillStyle="rgba(20,12,6,0.45)"; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
   }
-  // walls
+  // walls: solid mass with a lit top-left rim on exposed edges (auto-tiled bevel)
   for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
     const i=idx(x,y);
-    if(b.tiles[i]===WALL){
-      ctx.fillStyle = b.wallOwner[i]===1?pal.p1wall:pal.p2wall;
-      ctx.fillRect(x*TILE+1,y*TILE+1,TILE-2,TILE-2);
-    }
+    if(b.tiles[i]!==WALL) continue;
+    const o=b.wallOwner[i], px=x*TILE, py=y*TILE;
+    const wc = o===1?pal.p1wall:pal.p2wall;
+    ctx.fillStyle=wc; ctx.fillRect(px,py,TILE,TILE);
+    const up=isWallOwner(b,x,y-1,o), left=isWallOwner(b,x-1,y,o), down=isWallOwner(b,x,y+1,o), right=isWallOwner(b,x+1,y,o);
+    ctx.fillStyle=shade(wc,0.35);
+    if(!up)   ctx.fillRect(px,py,TILE,3);
+    if(!left) ctx.fillRect(px,py,3,TILE);
+    ctx.fillStyle=shade(wc,-0.4);
+    if(!down)  ctx.fillRect(px,py+TILE-3,TILE,3);
+    if(!right) ctx.fillRect(px+TILE-3,py,3,TILE);
+    // inner seam so adjacent blocks read as separate stones
+    ctx.fillStyle="rgba(0,0,0,0.10)";
+    if(right) ctx.fillRect(px+TILE-1,py,1,TILE);
+    if(down)  ctx.fillRect(px,py+TILE-1,TILE,1);
   }
-  // castles
+  // castles: raised keep with battlements + enclosure banner
   for(const c of b.castles){
-    ctx.fillStyle=COL_CASTLE;
-    ctx.fillRect(c.x*TILE,c.y*TILE,3*TILE,3*TILE);
-    ctx.strokeStyle="#555"; ctx.strokeRect(c.x*TILE,c.y*TILE,3*TILE,3*TILE);
+    const px=c.x*TILE, py=c.y*TILE, S=3*TILE;
+    ctx.fillStyle=COL_CASTLE; ctx.fillRect(px,py,S,S);
+    ctx.fillStyle=COL_CASTLE_HI; ctx.fillRect(px,py,S,3); ctx.fillRect(px,py,3,S);
+    ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.fillRect(px,py+S-3,S,3); ctx.fillRect(px+S-3,py,3,S);
+    // inner keep
+    ctx.fillStyle=shade(COL_CASTLE,-0.18); ctx.fillRect(px+TILE,py+TILE,TILE,TILE);
+    ctx.fillStyle=shade(COL_CASTLE,0.12); ctx.fillRect(px+TILE,py+TILE,TILE,3);
+    // battlement notches along the top
+    ctx.fillStyle=COL_BG;
+    for(let n=0;n<3;n++) ctx.fillRect(px+4+n*(TILE), py, 6, 5);
     if(c.enclosedBy){
+      const gc = c.enclosedBy===1?pal.p1glow:pal.p2glow;
       ctx.fillStyle = c.enclosedBy===1?pal.p1wall:pal.p2wall;
-      ctx.fillRect(c.x*TILE+TILE, c.y*TILE-8, 4,8);
+      ctx.fillRect(px+1.4*TILE, py-12, 3, 12);
+      ctx.fillStyle=gc; ctx.fillRect(px+1.4*TILE+3, py-12, 9, 6);
     }
   }
-  // cannons
+  // cannons: dark base plate + owner-tinted turret + barrel
   for(const c of b.cannons){
-    ctx.fillStyle = c.owner===1?pal.p1wall:pal.p2wall;
-    if(c.type==="super"){ ctx.fillStyle="#D4AF37"; }
-    ctx.fillRect(c.x*TILE, c.y*TILE, 2*TILE, 2*TILE);
+    const px=c.x*TILE, py=c.y*TILE, S=2*TILE, cx=px+TILE, cy=py+TILE;
+    const wc = c.type==="super" ? "#E7C24A" : (c.owner===1?pal.p1wall:pal.p2wall);
+    ctx.fillStyle=shade(wc,-0.55); ctx.fillRect(px,py,S,S);
+    ctx.fillStyle=shade(wc,-0.3); ctx.fillRect(px+2,py+2,S-4,S-4);
+    ctx.fillStyle=wc; ctx.beginPath(); ctx.arc(cx,cy,TILE*0.62,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=shade(wc,0.35); ctx.beginPath(); ctx.arc(cx-3,cy-3,TILE*0.28,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=shade(wc,-0.5); ctx.fillRect(cx-3, py+1, 6, TILE*0.7); // barrel toward enemy side
     if(c.reloadMs>0){
-      ctx.fillStyle="rgba(0,0,0,0.5)";
+      ctx.fillStyle="rgba(0,0,0,0.55)";
       const frac = c.reloadMs/2000;
-      ctx.fillRect(c.x*TILE, c.y*TILE, 2*TILE, 2*TILE*frac);
+      ctx.fillRect(px, py, S, S*frac);
     }
   }
 }
+function ballPos(b, f){
+  return { x:b.x0+(b.x1-b.x0)*f, y:b.y0+(b.y1-b.y0)*f - Math.sin(Math.PI*f)*b.arcH };
+}
 function drawFx(){
+  const pal = G.settings.colorblind ? PAL.cb : PAL.normal;
+  // placement pops: a bright square that overshoots then settles onto the placed wall
+  for(const p of G.fx.pops){
+    const fr=p.t/p.life, s=(1.35-0.35*fr)*TILE, a=1-fr;
+    const gc = p.owner===1?pal.p1glow:pal.p2glow;
+    ctx.fillStyle = "rgba(255,255,255,"+(a*0.5)+")";
+    ctx.fillRect(p.x*TILE+(TILE-s)/2, p.y*TILE+(TILE-s)/2, s, s);
+    ctx.strokeStyle = gc; ctx.globalAlpha=a; ctx.lineWidth=2;
+    ctx.strokeRect(p.x*TILE+(TILE-s)/2, p.y*TILE+(TILE-s)/2, s, s); ctx.globalAlpha=1;
+  }
+  // cannonballs with a fading motion trail (positions sampled slightly in the past)
   for(const b of G.balls){
     const f = b.t/b.T;
-    const x = b.x0 + (b.x1-b.x0)*f;
-    const y = b.y0 + (b.y1-b.y0)*f;
-    const arc = Math.sin(Math.PI*f)*b.arcH;
-    ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.beginPath(); ctx.ellipse(x,y,5,2,0,0,Math.PI*2); ctx.fill();
-    ctx.fillStyle = b.isSuper?"#D4AF37":"#F2EFE4";
-    ctx.beginPath(); ctx.arc(x,y-arc,b.isSuper?6:3,0,Math.PI*2); ctx.fill();
+    const g = ballPos(b, f);
+    for(let k=1;k<=4;k++){
+      const pf = Math.max(0, f - k*0.03), pg = ballPos(b, pf);
+      ctx.fillStyle = (b.isSuper?"rgba(231,194,74,":"rgba(245,241,230,")+(0.18*(1-k/5))+")";
+      ctx.beginPath(); ctx.arc(pg.x, pg.y, (b.isSuper?6:3)*(1-k*0.12), 0, Math.PI*2); ctx.fill();
+    }
+    const shy = b.x0+(b.x1-b.x0)*f, shyY = b.y0+(b.y1-b.y0)*f;
+    ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.beginPath(); ctx.ellipse(shy,shyY,5,2,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = b.isSuper?"#FFE9A0":"#FFFDF2";
+    ctx.beginPath(); ctx.arc(g.x,g.y,b.isSuper?6:3,0,Math.PI*2); ctx.fill();
   }
   for(const bl of G.balloons){
     const f = Math.min(1, bl.t/bl.T);
@@ -1188,13 +1319,14 @@ function drawFx(){
     ctx.strokeStyle="#999"; ctx.beginPath(); ctx.moveTo(x,y+5); ctx.lineTo(x,y+10); ctx.stroke();
   }
   for(const p of G.fx.particles){
-    ctx.fillStyle="rgba(120,90,60,"+(1-p.t/p.life)+")";
-    ctx.fillRect(p.x,p.y,3,3);
+    const a=1-p.t/p.life;
+    if(p.hot){ ctx.fillStyle="rgba("+(255)+","+Math.round(180+60*a)+","+Math.round(80*a)+","+a+")"; ctx.fillRect(p.x-1,p.y-1,4,4); }
+    else { ctx.fillStyle="rgba(120,90,60,"+a+")"; ctx.fillRect(p.x,p.y,3,3); }
   }
   // player cursors
   for(const P of G.players){
     if(!P.joined) continue;
-    ctx.strokeStyle = P.id===1 ? "#5AA0FF" : "#FF6060";
+    ctx.strokeStyle = P.id===1 ? pal.p1glow : pal.p2glow;
     ctx.lineWidth=2;
     if(G.round.phase==="COMBAT"){
       ctx.beginPath(); ctx.arc(P.cursor.px,P.cursor.py,8,0,Math.PI*2); ctx.stroke();
