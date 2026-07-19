@@ -1,0 +1,1270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Rampart Versus</title>
+<style>
+  html,body{margin:0;padding:0;background:#1B1B22;overflow:hidden;width:100%;height:100%;
+    display:flex;align-items:center;justify-content:center;font-family:monospace;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;background:#1B1B22;}
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="664"></canvas>
+<script>
+"use strict";
+/* =========================================================================
+   CONSTANTS
+   ========================================================================= */
+const TILE=20, COLS=48, ROWS=30, HUD_H=64, FIELD_W=960, FIELD_H=600;
+const LAND=0, WATER=1, ROCK=2, WALL=3, CASTLE=4, CANNON=5;
+const PAL = {
+  normal:{ p1wall:"#3A6EA5", p1tint:"rgba(90,140,200,0.25)", p2wall:"#A53A3A", p2tint:"rgba(220,120,120,0.25)" },
+  cb:    { p1wall:"#2C7BB6", p1tint:"rgba(44,123,182,0.25)", p2wall:"#E66101", p2tint:"rgba(230,97,1,0.25)" }
+};
+const COL_LAND=["#C9B27C","#BFA872","#D2BB86"], COL_WATER="#2E5E6E", COL_WATER2="#3A7285",
+      COL_ROCK="#6E6E64", COL_CASTLE="#8A8A8A", COL_TEXT="#F2EFE4", COL_BG="#1B1B22";
+
+/* =========================================================================
+   MAP DATA
+   ========================================================================= */
+const MAPS = [
+{ id:"channel", name:"Channel", cols:48, rows:30,
+  water:[[21,0,6,30]], rocks:[],
+  p1Cols:[0,20], p2Cols:[27,47],
+  castles:[
+    {x:5,y:5,side:1},{x:5,y:20,side:1},{x:13,y:12,side:1},
+    {x:40,y:5,side:2},{x:40,y:20,side:2},{x:32,y:12,side:2}
+  ]},
+{ id:"delta", name:"Delta", cols:48, rows:30,
+  water:[[22,0,4,10],[20,10,8,10],[18,20,12,10]],
+  rocks:[[21,12,3,3],[21,21,3,3]],
+  p1Cols:[0,19], p2Cols:[28,47],
+  castles:[
+    {x:3,y:3,side:1},{x:3,y:14,side:1},{x:3,y:24,side:1},
+    {x:42,y:3,side:2},{x:42,y:14,side:2},{x:42,y:24,side:2}
+  ]},
+{ id:"coves", name:"Coves", cols:48, rows:30,
+  water:[[21,0,5,30],[15,4,6,6],[15,19,6,6],[27,4,6,6],[27,19,6,6]],
+  rocks:[],
+  p1Cols:[0,21], p2Cols:[26,47],
+  castles:[
+    {x:8,y:3,side:1},{x:8,y:14,side:1},{x:8,y:24,side:1},
+    {x:37,y:3,side:2},{x:37,y:14,side:2},{x:37,y:24,side:2}
+  ]},
+{ id:"highlands", name:"Highlands", cols:48, rows:30,
+  water:[[21,0,6,30]],
+  rocks:[[6,10,2,2],[10,15,3,2],[6,25,2,2],[12,26,3,2],[40,10,2,2],[35,15,3,2],[40,25,2,2],[33,26,3,2]],
+  p1Cols:[0,20], p2Cols:[27,47],
+  castles:[
+    {x:3,y:3,side:1},{x:15,y:3,side:1},{x:3,y:21,side:1},{x:15,y:21,side:1},
+    {x:30,y:3,side:2},{x:42,y:3,side:2},{x:30,y:21,side:2},{x:42,y:21,side:2}
+  ]}
+];
+
+/* =========================================================================
+   PIECES
+   ========================================================================= */
+const PIECE_TABLE = [
+ {id:"MONO1", cells:[[0,0]], w:1},
+ {id:"DOM2",  cells:[[0,0],[1,0]], w:2},
+ {id:"I3",    cells:[[-1,0],[0,0],[1,0]], w:3},
+ {id:"L3",    cells:[[0,-1],[0,0],[1,0]], w:3},
+ {id:"I4",    cells:[[-1,0],[0,0],[1,0],[2,0]], w:4},
+ {id:"O4",    cells:[[0,0],[1,0],[0,1],[1,1]], w:4},
+ {id:"T4",    cells:[[-1,0],[0,0],[1,0],[0,1]], w:4},
+ {id:"S4",    cells:[[0,0],[1,0],[-1,1],[0,1]], w:4},
+ {id:"Z4",    cells:[[-1,0],[0,0],[0,1],[1,1]], w:4},
+ {id:"L4",    cells:[[-1,0],[0,0],[1,0],[1,1]], w:4},
+ {id:"J4",    cells:[[-1,0],[0,0],[1,0],[-1,1]], w:4},
+ {id:"PLUS5", cells:[[0,-1],[-1,0],[0,0],[1,0],[0,1]], w:2}
+];
+const MEGA9 = { id:"MEGA9", cells:(()=>{ let c=[]; for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) c.push([dx,dy]); return c; })(), w:0 };
+const KICK_OFFSETS = [[0,0],[1,0],[-1,0],[0,1],[0,-1],[2,0],[-2,0],[0,2],[0,-2]];
+
+function pickPiece(){
+  let total=0; for(const p of PIECE_TABLE) total+=p.w;
+  let r = Math.random()*total;
+  for(const p of PIECE_TABLE){ if(r<p.w) return clonePiece(p); r-=p.w; }
+  return clonePiece(PIECE_TABLE[0]);
+}
+function clonePiece(p){ return { id:p.id, cells:p.cells.map(c=>c.slice()) }; }
+function rotateCells(cells, dir){
+  // dir: 1 = CW: (dx,dy)->(-dy,dx) ; -1 = CCW: (dx,dy)->(dy,-dx)
+  return cells.map(([dx,dy])=> dir===1 ? [-dy,dx] : [dy,-dx]);
+}
+
+/* =========================================================================
+   GLOBAL STATE
+   ========================================================================= */
+let G = null;
+let AUDIO = { ctx:null, sfx:true, music:true, musicNodes:null };
+
+function newPlayer(id){
+  return {
+    id, padIndex:null, joined:false, usesKeyboard:false,
+    map:{ fire:0, rotCW:1, rotCCW:2, holdPwr:3 },
+    cursor:{ tx:0, ty:0, px:0, py:0 },
+    score:0, homeCastleIdx:null,
+    piece:{ cur:null, next:[null,null], held:null, canHold:true },
+    allotment:0, bonusAllotment:0,
+    inventory:null, superPending:false, placedOrder:[],
+    armMode:"cannon", powerupSel:0,
+    castleSelIdx:0, confirmed:false, remapStep:0
+  };
+}
+
+function freshG(){
+  return {
+    screen:"title",
+    settings:{ mapId:"channel", bestOf:3, maxCycles:6, timerPreset:1.0, colorblind:false, sfx:true, music:true },
+    match:{ roundWins:[0,0], roundIndex:0, suddenDeath:false },
+    round:{ cycle:0, phase:"CASTLESELECT", phaseMs:0 },
+    board:null,
+    players:[ newPlayer(1), newPlayer(2) ],
+    balls:[], balloons:[],
+    fx:{ particles:[], shakeMs:0, shakeMag:0 },
+    pauseFrom:null,
+    remap:{ playerIdx:0, actionIdx:0 },
+    joinDone:false
+  };
+}
+
+/* =========================================================================
+   BOARD MODULE
+   ========================================================================= */
+function idx(x,y){ return y*COLS+x; }
+function inBounds(x,y){ return x>=0 && y>=0 && x<COLS && y<ROWS; }
+function tileAt(b,x,y){ if(!inBounds(x,y)) return ROCK; return b.tiles[idx(x,y)]; }
+
+function initBoard(mapId){
+  const map = MAPS.find(m=>m.id===mapId) || MAPS[0];
+  const tiles = new Uint8Array(COLS*ROWS).fill(LAND);
+  const wallOwner = new Uint8Array(COLS*ROWS);
+  const scorch = new Uint8Array(COLS*ROWS);
+  for(const [x,y,w,h] of map.water){ for(let yy=y;yy<y+h;yy++) for(let xx=x;xx<x+w;xx++) if(inBounds(xx,yy)) tiles[idx(xx,yy)]=WATER; }
+  for(const [x,y,w,h] of map.rocks){ for(let yy=y;yy<y+h;yy++) for(let xx=x;xx<x+w;xx++) if(inBounds(xx,yy)) tiles[idx(xx,yy)]=ROCK; }
+  const castles = map.castles.map(c=>({ x:c.x, y:c.y, side:c.side, enclosedBy:0 }));
+  for(const c of castles) stampCastleFootprint(tiles, c);
+  return { map, tiles, wallOwner, scorch, castles, cannons:[], outside:new Uint8Array(COLS*ROWS) };
+}
+function stampCastleFootprint(tiles, c){
+  for(let dy=0;dy<3;dy++) for(let dx=0;dx<3;dx++) tiles[idx(c.x+dx,c.y+dy)] = CASTLE;
+}
+function stampWallRing(board, c, owner){
+  const x0=c.x-3, y0=c.y-3, x1=c.x+5, y1=c.y+5;
+  for(let x=x0;x<=x1;x++) for(let y=y0;y<=y1;y++){
+    if(x===x0||x===x1||y===y0||y===y1){
+      if(inBounds(x,y)){ board.tiles[idx(x,y)]=WALL; board.wallOwner[idx(x,y)]=owner; }
+    }
+  }
+}
+function isSideCol(board,x,player){
+  const range = player===1 ? board.map.p1Cols : board.map.p2Cols;
+  return x>=range[0] && x<=range[1];
+}
+function stampCannonFootprint(board, c){
+  for(let dy=0;dy<2;dy++) for(let dx=0;dx<2;dx++) board.tiles[idx(c.x+dx,c.y+dy)] = CANNON;
+}
+function clearCannonFootprint(board, c){
+  for(let dy=0;dy<2;dy++) for(let dx=0;dx<2;dx++) board.tiles[idx(c.x+dx,c.y+dy)] = LAND;
+}
+
+/* =========================================================================
+   ENCLOSURE MODULE (fragile algorithm #1)
+   ========================================================================= */
+function isSolid(t){ return t===WALL || t===CASTLE || t===CANNON; }
+function computeEnclosure(board){
+  const outside = new Uint8Array(COLS*ROWS);
+  const q = [];
+  // seed: every border tile that is not solid
+  for(let x=0;x<COLS;x++){
+    for(const y of [0,ROWS-1]){
+      const i=idx(x,y);
+      if(!isSolid(board.tiles[i]) && !outside[i]){ outside[i]=1; q.push(i); }
+    }
+  }
+  for(let y=0;y<ROWS;y++){
+    for(const x of [0,COLS-1]){
+      const i=idx(x,y);
+      if(!isSolid(board.tiles[i]) && !outside[i]){ outside[i]=1; q.push(i); }
+    }
+  }
+  let head=0;
+  while(head<q.length){
+    const i=q[head++];
+    const x=i%COLS, y=(i/COLS)|0;
+    const nbrs=[[x-1,y],[x+1,y],[x,y-1],[x,y+1]];
+    for(const [nx,ny] of nbrs){
+      if(!inBounds(nx,ny)) continue;
+      const ni=idx(nx,ny);
+      if(outside[ni]) continue;
+      if(isSolid(board.tiles[ni])) continue;
+      outside[ni]=1; q.push(ni);
+    }
+  }
+  board.outside = outside;
+  // castles
+  for(const c of board.castles){
+    let enclosed = true;
+    outer:
+    for(let dx=0;dx<3;dx++) for(let dy=0;dy<3;dy++){
+      const x=c.x+dx, y=c.y+dy;
+      const nbrs=[[x-1,y],[x+1,y],[x,y-1],[x,y+1]];
+      for(const [nx,ny] of nbrs){
+        if(!inBounds(nx,ny)) continue;
+        if(outside[idx(nx,ny)]){ enclosed=false; break outer; }
+      }
+    }
+    c.enclosedBy = enclosed ? c.side : 0;
+  }
+  return outside;
+}
+function cannonEnclosed(board, c){
+  for(let dx=0;dx<2;dx++) for(let dy=0;dy<2;dy++){
+    const x=c.x+dx, y=c.y+dy;
+    const nbrs=[[x-1,y],[x+1,y],[x,y-1],[x,y+1]];
+    for(const [nx,ny] of nbrs){
+      if(!inBounds(nx,ny)) continue;
+      if(board.outside[idx(nx,ny)]) return false;
+    }
+  }
+  return true;
+}
+
+/* =========================================================================
+   PHASE DURATIONS (base ms, multiplied by settings.timerPreset)
+   ========================================================================= */
+const PHASE_BASE_MS = { CASTLESELECT:10000, ARM:10000, COMBAT:20000, COMBAT_GRACE:1000, BUILD:25000 };
+function phaseDuration(phase){ return PHASE_BASE_MS[phase] * G.settings.timerPreset; }
+
+/* =========================================================================
+   AUDIO MODULE
+   ========================================================================= */
+function audioInit(){
+  if(AUDIO.ctx) return;
+  try{ AUDIO.ctx = new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ AUDIO.ctx=null; }
+}
+function beep(freq, dur, type, vol){
+  if(!AUDIO.ctx || !G.settings.sfx) return;
+  try{
+    const t = AUDIO.ctx.currentTime;
+    const osc = AUDIO.ctx.createOscillator();
+    const gain = AUDIO.ctx.createGain();
+    osc.type = type||"square"; osc.frequency.value = freq;
+    gain.gain.setValueAtTime(vol||0.15, t);
+    gain.gain.exponentialRampToValueAtTime(0.001, t+dur);
+    osc.connect(gain); gain.connect(AUDIO.ctx.destination);
+    osc.start(t); osc.stop(t+dur);
+  }catch(e){}
+}
+const SFX = {
+  place:()=>beep(220,0.08,"square",0.1),
+  rotate:()=>beep(340,0.05,"square",0.08),
+  fire:()=>beep(120,0.15,"sawtooth",0.15),
+  hit:()=>beep(90,0.2,"square",0.2),
+  wallHit:()=>beep(160,0.12,"triangle",0.15),
+  castleHit:()=>beep(500,0.08,"sine",0.1),
+  deny:()=>beep(80,0.1,"square",0.08),
+  confirm:()=>beep(440,0.12,"sine",0.12),
+  balloon:()=>beep(600,0.2,"sine",0.1)
+};
+let musicTimer=0, musicStep=0;
+function updateMusic(dtMs){
+  if(!AUDIO.ctx || !G.settings.music) return;
+  musicTimer -= dtMs;
+  if(musicTimer<=0){
+    const notes=[220,262,294,330,294,262];
+    beep(notes[musicStep%notes.length], 0.3, "sine", 0.04);
+    musicStep++; musicTimer = 400;
+  }
+}
+
+/* =========================================================================
+   INPUT MODULE
+   ========================================================================= */
+const prevPadButtons = {}; // padIndex -> [bool...]
+const keys = {}; // keyboard state
+window.addEventListener("keydown", e=>{ keys[e.code]=true; });
+window.addEventListener("keyup", e=>{ keys[e.code]=false; });
+let prevKeys = {};
+
+let GAMEPADS_BLOCKED = false;
+function getPads(){
+  if(GAMEPADS_BLOCKED || !navigator.getGamepads) return [];
+  try{
+    return navigator.getGamepads();
+  }catch(e){
+    GAMEPADS_BLOCKED = true;
+    padBanner = "Gamepad access blocked in this frame — use keyboard (Enter to join, arrows/Z/X/C/V/P)";
+    return [];
+  }
+}
+
+function padPressed(padIndex, btnIndex){
+  const pads = getPads();
+  const pad = pads[padIndex];
+  if(!pad) return false;
+  const now = !!(pad.buttons[btnIndex] && pad.buttons[btnIndex].pressed);
+  const prevArr = prevPadButtons[padIndex] || [];
+  const was = !!prevArr[btnIndex];
+  return now && !was;
+}
+function padHeld(padIndex, btnIndex){
+  const pads = getPads();
+  const pad = pads[padIndex];
+  if(!pad) return false;
+  return !!(pad.buttons[btnIndex] && pad.buttons[btnIndex].pressed);
+}
+function keyPressed(code){ return !!keys[code] && !prevKeys[code]; }
+function keyHeld(code){ return !!keys[code]; }
+
+function snapshotPrevButtons(){
+  const pads = getPads();
+  for(let i=0;i<pads.length;i++){
+    const pad = pads[i];
+    if(!pad) continue;
+    prevPadButtons[i] = pad.buttons.map(b=>b.pressed);
+  }
+  prevKeys = Object.assign({}, keys);
+}
+
+// generic action check for a player: returns true on rising edge
+function actionPressed(P, action){
+  if(P.usesKeyboard){
+    const map = { fire:"KeyZ", rotCW:"KeyX", rotCCW:"KeyC", holdPwr:"KeyV", pause:"KeyP" };
+    return keyPressed(map[action]);
+  }
+  if(P.padIndex===null) return false;
+  const btn = action==="pause" ? 9 : P.map[action];
+  return padPressed(P.padIndex, btn);
+}
+function moveIntent(P){
+  // returns {x,y} in [-1,1], from stick + dpad
+  let x=0,y=0;
+  if(P.usesKeyboard){
+    if(keyHeld("ArrowLeft")) x-=1;
+    if(keyHeld("ArrowRight")) x+=1;
+    if(keyHeld("ArrowUp")) y-=1;
+    if(keyHeld("ArrowDown")) y+=1;
+    return {x,y};
+  }
+  if(P.padIndex===null) return {x:0,y:0};
+  const pad = getPads()[P.padIndex];
+  if(!pad) return {x:0,y:0};
+  let ax = pad.axes[0]||0, ay = pad.axes[1]||0;
+  if(Math.abs(ax)<0.35) ax=0;
+  if(Math.abs(ay)<0.35) ay=0;
+  x = ax; y = ay;
+  // dpad buttons 12(up)13(down)14(left)15(right)
+  if(pad.buttons[14] && pad.buttons[14].pressed) x=-1;
+  if(pad.buttons[15] && pad.buttons[15].pressed) x=1;
+  if(pad.buttons[12] && pad.buttons[12].pressed) y=-1;
+  if(pad.buttons[13] && pad.buttons[13].pressed) y=1;
+  return {x,y};
+}
+function moveDirPressed(P){
+  // discrete tile-step direction with DAS, returns {dx,dy} or null
+  const now = moveIntent(P);
+  const threshold=0.5;
+  let dx = now.x>threshold?1:(now.x<-threshold?-1:0);
+  let dy = now.y>threshold?1:(now.y<-threshold?-1:0);
+  if(dx===0 && dy===0){ P._dasDir=null; P._dasTimer=0; return null; }
+  const dirKey = dx+","+dy;
+  const t = performance.now();
+  if(P._dasDir !== dirKey){
+    P._dasDir = dirKey; P._dasTimer = t + 250;
+    return {dx,dy};
+  } else {
+    if(t >= P._dasTimer){ P._dasTimer = t + 60; return {dx,dy}; }
+    return null;
+  }
+}
+
+/* join gate */
+function updateJoinScreen(){
+  const pads = getPads();
+  for(let i=0;i<pads.length;i++){
+    const pad = pads[i];
+    if(!pad) continue;
+    if(pad.buttons[0] && pad.buttons[0].pressed && !prevPadButtons[i]?.[0]){
+      // find free slot not already bound to this pad
+      const already = G.players.find(p=>p.padIndex===i);
+      if(!already){
+        const free = G.players.find(p=>!p.joined);
+        if(free){ free.padIndex=i; free.joined=true; free.usesKeyboard=false; SFX.confirm(); }
+      }
+    }
+  }
+  if(keyPressed("Enter")){
+    const already = G.players.find(p=>p.usesKeyboard);
+    if(!already){
+      const free = G.players.find(p=>!p.joined);
+      if(free){ free.usesKeyboard=true; free.joined=true; SFX.confirm(); }
+    }
+  }
+  if(G.players.every(p=>p.joined)){
+    G.screen = "mapselect";
+  }
+}
+
+/* pad connect/disconnect handling */
+let padBanner = "";
+window.addEventListener("gamepadconnected", e=>{
+  padBanner = "Controller connected: P"+(e.gamepad.index+1);
+  // if a bound player lost this index before (disconnect during match), try silent rebind by same index
+  for(const p of G.players ? G.players : []){
+    if(p._pendingReconnectIndex === e.gamepad.index){ p.padIndex = e.gamepad.index; p._pendingReconnectIndex=null; }
+  }
+});
+window.addEventListener("gamepaddisconnected", e=>{
+  padBanner = "Controller disconnected: pad "+e.gamepad.index;
+  if(!G) return;
+  for(const p of G.players){
+    if(p.padIndex === e.gamepad.index){
+      p._pendingReconnectIndex = e.gamepad.index;
+      p.padIndex = null;
+      if(G.screen==="match"){ G.pauseFrom = G.screen; G.screen="pause"; G.pauseReason="Reconnect controller for P"+p.id; }
+    }
+  }
+});
+
+/* =========================================================================
+   PIECES MODULE - placement / rotation
+   ========================================================================= */
+function pieceCellsAbs(P, cells){
+  return cells.map(([dx,dy])=>[P.cursor.tx+dx, P.cursor.ty+dy]);
+}
+function pieceFitsForRotation(P, cells){
+  for(const [x,y] of pieceCellsAbs(P,cells)){
+    if(!inBounds(x,y)) return false;
+    if(!isSideCol(G.board, x, P.id)) return false;
+  }
+  return true;
+}
+function tryRotate(P, dir){
+  const rotated = rotateCells(P.piece.cur.cells, dir);
+  for(const [ox,oy] of KICK_OFFSETS){
+    const testCells = rotated.map(([dx,dy])=>[dx,dy]);
+    const savedTx=P.cursor.tx, savedTy=P.cursor.ty;
+    P.cursor.tx += ox; P.cursor.ty += oy;
+    if(pieceFitsForRotation(P, testCells)){
+      P.piece.cur.cells = testCells;
+      SFX.rotate();
+      return true;
+    }
+    P.cursor.tx = savedTx; P.cursor.ty = savedTy;
+  }
+  SFX.deny();
+  return false;
+}
+function placementLegal(P){
+  for(const [x,y] of pieceCellsAbs(P, P.piece.cur.cells)){
+    if(!inBounds(x,y)) return false;
+    if(!isSideCol(G.board, x, P.id)) return false;
+    if(tileAt(G.board,x,y) !== LAND) return false;
+  }
+  return true;
+}
+function drawNextPiece(P){
+  P.piece.cur = P.piece.next[0];
+  P.piece.next[0] = P.piece.next[1];
+  P.piece.next[1] = pickPiece();
+}
+function commitPlacement(P){
+  for(const [x,y] of pieceCellsAbs(P, P.piece.cur.cells)){
+    G.board.tiles[idx(x,y)] = WALL;
+    G.board.wallOwner[idx(x,y)] = P.id;
+  }
+  computeEnclosure(G.board);
+  P.piece.canHold = true;
+  SFX.place();
+  drawNextPiece(P);
+  if(G.mega1st === P.id){ P.piece.cur = clonePiece(MEGA9); G.mega1st = null; }
+}
+function tryHold(P){
+  if(!P.piece.canHold) return;
+  if(P.piece.held===null){
+    P.piece.held = P.piece.cur;
+    drawNextPiece(P);
+  } else {
+    const tmp = P.piece.cur; P.piece.cur = P.piece.held; P.piece.held = tmp;
+  }
+  P.piece.canHold = false;
+}
+
+/* =========================================================================
+   COMBAT MODULE
+   ========================================================================= */
+function activeCannons(playerId){ return G.board.cannons.filter(c=>c.owner===playerId && c.active); }
+function ballsInFlight(playerId){ return G.balls.filter(b=>b.owner===playerId).length; }
+
+function combatCursorClampRange(P){
+  const opp = P.id===1 ? G.board.map.p2Cols : G.board.map.p1Cols;
+  const water = G.board.map.water;
+  return { min:0, max:COLS*TILE };
+}
+function updateCombatCursor(P, dtMs){
+  const m = moveIntent(P);
+  const speed = 280 * dtMs/1000;
+  P.cursor.px += m.x*speed;
+  P.cursor.py += m.y*speed;
+  P.cursor.px = Math.max(0, Math.min(FIELD_W, P.cursor.px));
+  P.cursor.py = Math.max(0, Math.min(FIELD_H, P.cursor.py));
+}
+function fireRequest(P){
+  const cannons = activeCannons(P.id);
+  if(cannons.length===0){ SFX.deny(); return; }
+  if(ballsInFlight(P.id) >= cannons.length){ SFX.deny(); return; }
+  if(P.superPending){
+    const superC = cannons.find(c=>c.type==="super");
+    if(superC){
+      spawnBall(P, superC, true);
+      G.board.cannons = G.board.cannons.filter(c=>c!==superC);
+      clearCannonFootprint(G.board, superC);
+      P.superPending = false;
+      SFX.fire();
+      return;
+    }
+    P.superPending = false;
+  }
+  const loaded = cannons.filter(c=>c.reloadMs<=0).sort((a,b)=>a.id-b.id);
+  if(loaded.length===0){ SFX.deny(); return; }
+  const c = loaded[0];
+  c.reloadMs = 2000;
+  spawnBall(P, c, false);
+  SFX.fire();
+}
+let ballIdSeq=1;
+function spawnBall(P, cannon, isSuper){
+  // all coordinates here are in field-space px (0..960 x, 0..600 y); HUD offset is applied only at render time.
+  const targetX = P.cursor.px, targetY = P.cursor.py;
+  const cx = (cannon.x+1)*TILE, cy = (cannon.y+1)*TILE;
+  const dtiles = Math.hypot((targetX-cx)/TILE, (targetY-cy)/TILE);
+  const T = 350 + 12*dtiles;
+  G.balls.push({
+    id: ballIdSeq++, owner:P.id, isSuper,
+    x0:cx, y0:cy, x1:targetX, y1:targetY,
+    t:0, T, arcH: Math.min(40, 8+dtiles*1.2)
+  });
+}
+function updateBalls(dtMs){
+  for(const b of G.balls){ b.t += dtMs; }
+  const done = G.balls.filter(b=>b.t>=b.T);
+  G.balls = G.balls.filter(b=>b.t<b.T);
+  for(const b of done) resolveImpact(b);
+}
+function fieldTileFromPx(px,py){ return { x: Math.floor(px/TILE), y: Math.floor(py/TILE) }; }
+function resolveImpact(b){
+  const shooter = b.owner;
+  const targets = [];
+  if(b.isSuper){
+    const {x,y} = fieldTileFromPx(b.x1,b.y1);
+    for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++) targets.push([x+dx,y+dy]);
+  } else {
+    targets.push([fieldTileFromPx(b.x1,b.y1).x, fieldTileFromPx(b.x1,b.y1).y]);
+  }
+  let hitSomething=false;
+  for(const [tx,ty] of targets){
+    if(!inBounds(tx,ty)) continue;
+    const t = tileAt(G.board,tx,ty);
+    if(t===CANNON){
+      const c = G.board.cannons.find(cc=>tx>=cc.x&&tx<cc.x+2&&ty>=cc.y&&ty<cc.y+2);
+      if(c && c.owner!==shooter){
+        clearCannonFootprint(G.board,c);
+        G.board.cannons = G.board.cannons.filter(cc=>cc!==c);
+        const P = G.players.find(p=>p.id===shooter);
+        P.score += 10;
+        hitSomething=true; SFX.hit();
+      }
+    } else if(t===WALL){
+      G.board.tiles[idx(tx,ty)] = LAND;
+      G.board.scorch[idx(tx,ty)] = 30;
+      const P = G.players.find(p=>p.id===shooter);
+      P.score += 2;
+      hitSomething=true; SFX.wallHit();
+      spawnParticles(tx*TILE+10, ty*TILE+10);
+    } else if(t===CASTLE){
+      SFX.castleHit(); hitSomething=true;
+    }
+  }
+  G.fx.shakeMs = b.isSuper ? 250 : 100;
+  G.fx.shakeMag = b.isSuper ? 10 : 4;
+  computeEnclosure(G.board);
+}
+function spawnParticles(x,y){
+  for(let i=0;i<8;i++){
+    G.fx.particles.push({ x, y, vx:(Math.random()-0.5)*120, vy:(Math.random()-0.5)*120-40, life:400, t:0 });
+  }
+}
+function updateParticles(dtMs){
+  for(const p of G.fx.particles){ p.t+=dtMs; p.x+=p.vx*dtMs/1000; p.y+=p.vy*dtMs/1000; p.vy+=300*dtMs/1000; }
+  G.fx.particles = G.fx.particles.filter(p=>p.t<p.life);
+}
+
+/* balloons */
+function tryBalloonToggle(P){
+  if(P.inventory!=="balloon") return;
+  P._balloonMode = !P._balloonMode;
+}
+function launchBalloon(P){
+  if(P.inventory!=="balloon" || !P._balloonMode) return;
+  const oppId = P.id===1?2:1;
+  const oppCannons = activeCannons(oppId);
+  const cx = P.cursor.px/TILE, cy = P.cursor.py/TILE;
+  let best=null, bestD=Infinity;
+  for(const c of oppCannons){
+    const ccx=c.x+1, ccy=c.y+1;
+    const d = Math.hypot(ccx-cx, ccy-cy);
+    if(d<=3 && d<bestD){ bestD=d; best=c; }
+  }
+  if(!best){ SFX.deny(); return; }
+  G.balloons.push({ target:best, owner:P.id, t:0, T:1500, x0:P.cursor.px, y0:P.cursor.py });
+  P.inventory=null; P._balloonMode=false;
+  SFX.balloon();
+}
+function updateBalloons(dtMs){
+  for(const bl of G.balloons) bl.t+=dtMs;
+  const done = G.balloons.filter(bl=>bl.t>=bl.T);
+  G.balloons = G.balloons.filter(bl=>bl.t<bl.T);
+  for(const bl of done){
+    const c = bl.target;
+    if(G.board.cannons.includes(c)){
+      clearCannonFootprint(G.board,c);
+      G.board.cannons = G.board.cannons.filter(cc=>cc!==c);
+      const P = G.players.find(p=>p.id===bl.owner);
+      P.bonusAllotment += 1;
+    }
+  }
+  if(done.length) computeEnclosure(G.board);
+}
+
+/* =========================================================================
+   POWERUPS MODULE
+   ========================================================================= */
+function canPurchase(P){
+  return P.inventory===null && !P.superPending && activeCannons(P.id).length>=3;
+}
+function payCost(P){
+  for(let i=0;i<3;i++){
+    const cid = P.placedOrder.pop();
+    const c = G.board.cannons.find(cc=>cc.id===cid);
+    if(c){ clearCannonFootprint(G.board,c); G.board.cannons = G.board.cannons.filter(cc=>cc!==c); }
+  }
+  computeEnclosure(G.board);
+}
+function purchase(P, type){
+  if(!canPurchase(P)){ SFX.deny(); return; }
+  payCost(P);
+  if(type==="balloon"){ P.inventory="balloon"; SFX.confirm(); }
+  else if(type==="mega"){ P.inventory="mega"; SFX.confirm(); }
+  else if(type==="supercannon"){ P._placingSuper=true; SFX.confirm(); }
+}
+
+/* =========================================================================
+   PHASES MODULE
+   ========================================================================= */
+function enterPhase(phase){
+  G.round.phase = phase;
+  G.round.phaseMs = phaseDuration(phase);
+  if(phase==="CASTLESELECT"){
+    for(const P of G.players) P.confirmed = false;
+  }
+  if(phase==="ARM"){
+    computeEnclosure(G.board);
+    for(const P of G.players){
+      const enclosedCastles = G.board.castles.filter(c=>c.side===P.id && c.enclosedBy===P.id).length;
+      const home = G.board.castles[P.homeCastleIdx];
+      const homeBonus = (home && home.enclosedBy===P.id) ? 1 : 0;
+      P.allotment = enclosedCastles + homeBonus + P.bonusAllotment;
+      P.bonusAllotment = 0;
+      P.armMode="cannon"; P._placingSuper=false;
+      P.cursor.tx = P.id===1 ? Math.floor((G.board.map.p1Cols[0]+G.board.map.p1Cols[1])/2) : Math.floor((G.board.map.p2Cols[0]+G.board.map.p2Cols[1])/2);
+      P.cursor.ty = Math.floor(ROWS/2);
+    }
+  }
+  if(phase==="COMBAT"){
+    for(const P of G.players){
+      P.cursor.px = P.id===1 ? FIELD_W*0.75 : FIELD_W*0.25;
+      P.cursor.py = FIELD_H/2;
+      P._balloonMode=false;
+    }
+    for(const c of G.board.cannons) c.reloadMs = Math.min(c.reloadMs, 0);
+  }
+  if(phase==="BUILD"){
+    for(const P of G.players){
+      if(!P.piece.cur) drawNextPiece(P);
+      if(!P.piece.next[0]) P.piece.next[0]=pickPiece();
+      if(!P.piece.next[1]) P.piece.next[1]=pickPiece();
+      P.cursor.tx = P.id===1 ? Math.floor((G.board.map.p1Cols[0]+G.board.map.p1Cols[1])/2) : Math.floor((G.board.map.p2Cols[0]+G.board.map.p2Cols[1])/2);
+      P.cursor.ty = Math.floor(ROWS/2);
+      P.piece.canHold = true;
+      if(P.inventory==="mega"){ G.mega1st = P.id; P.piece.cur = clonePiece(MEGA9); P.inventory=null; }
+      else { drawNextPiece(P); }
+    }
+  }
+}
+
+function evalRoundEnd(){
+  computeEnclosure(G.board);
+  // remove cannons failing enclosure
+  for(const c of [...G.board.cannons]){
+    if(!cannonEnclosed(G.board,c)){
+      clearCannonFootprint(G.board,c);
+      G.board.cannons = G.board.cannons.filter(cc=>cc!==c);
+      const idxOrder = G.players.find(p=>p.id===c.owner);
+      if(idxOrder) idxOrder.placedOrder = idxOrder.placedOrder.filter(id=>id!==c.id);
+    }
+  }
+  computeEnclosure(G.board);
+  // score
+  for(const P of G.players){
+    let interior=0;
+    const range = P.id===1 ? G.board.map.p1Cols : G.board.map.p2Cols;
+    for(let x=range[0]; x<=range[1]; x++) for(let y=0;y<ROWS;y++){
+      const i=idx(x,y);
+      if(!G.board.outside[i] && !isSolid(G.board.tiles[i])) interior++;
+    }
+    P.score += interior;
+    const enclosedCastles = G.board.castles.filter(c=>c.side===P.id && c.enclosedBy===P.id).length;
+    P.score += 25*enclosedCastles;
+  }
+  const p1Enc = G.board.castles.filter(c=>c.side===1 && c.enclosedBy===1).length;
+  const p2Enc = G.board.castles.filter(c=>c.side===2 && c.enclosedBy===2).length;
+  let roundWinner = null, voidRound=false;
+  if(p1Enc===0 && p2Enc>0) roundWinner=2;
+  else if(p2Enc===0 && p1Enc>0) roundWinner=1;
+  else if(p1Enc===0 && p2Enc===0){
+    let p1int=0,p2int=0;
+    for(let x=G.board.map.p1Cols[0]; x<=G.board.map.p1Cols[1]; x++) for(let y=0;y<ROWS;y++){
+      const i=idx(x,y); if(!G.board.outside[i] && !isSolid(G.board.tiles[i])) p1int++;
+    }
+    for(let x=G.board.map.p2Cols[0]; x<=G.board.map.p2Cols[1]; x++) for(let y=0;y<ROWS;y++){
+      const i=idx(x,y); if(!G.board.outside[i] && !isSolid(G.board.tiles[i])) p2int++;
+    }
+    if(p1int>p2int) roundWinner=1; else if(p2int>p1int) roundWinner=2; else voidRound=true;
+  } else if(G.round.cycle >= G.settings.maxCycles){
+    if(G.players[0].score>G.players[1].score) roundWinner=1;
+    else if(G.players[1].score>G.players[0].score) roundWinner=2;
+    else if(p1Enc>p2Enc) roundWinner=1; else if(p2Enc>p1Enc) roundWinner=2; else voidRound=true;
+  }
+  if(roundWinner || voidRound){
+    if(roundWinner) G.match.roundWins[roundWinner-1]++;
+    G.match.roundIndex++;
+    G.roundResultText = voidRound ? "Round void" : ("P"+roundWinner+" wins the round");
+    G.screen = "roundend";
+    return;
+  }
+  G.round.cycle++;
+  enterPhase("ARM");
+}
+
+function advancePhaseTimer(dtMs){
+  G.round.phaseMs -= dtMs;
+  if(G.round.phaseMs > 0) return;
+  switch(G.round.phase){
+    case "CASTLESELECT": finalizeCastleSelect(); enterPhase("ARM"); break;
+    case "ARM": enterPhase("COMBAT"); break;
+    case "COMBAT": enterPhase("COMBAT_GRACE"); break;
+    case "COMBAT_GRACE": enterPhase("BUILD"); break;
+    case "BUILD": evalRoundEnd(); break;
+  }
+}
+function finalizeCastleSelect(){
+  for(const P of G.players){
+    const sideCastles = G.board.castles.map((c,i)=>({c,i})).filter(o=>o.c.side===P.id);
+    let chosen;
+    if(P.confirmed && P._selectedCastleIdx!=null) chosen = P._selectedCastleIdx;
+    else chosen = sideCastles[Math.floor(sideCastles.length/2)].i;
+    P.homeCastleIdx = chosen;
+    stampWallRing(G.board, G.board.castles[chosen], P.id);
+  }
+  computeEnclosure(G.board);
+}
+
+/* =========================================================================
+   ROUND / MATCH SETUP
+   ========================================================================= */
+function startRound(freshMap){
+  if(freshMap || !G.board) G.board = initBoard(G.settings.mapId);
+  else G.board = initBoard(G.settings.mapId);
+  G.balls=[]; G.balloons=[]; G.fx.particles=[];
+  G.round.cycle = 0;
+  for(const P of G.players){
+    P.score=0; P.homeCastleIdx=null; P.allotment=0; P.bonusAllotment=0;
+    P.inventory=null; P.superPending=false; P.placedOrder=[];
+    P.piece={ cur:null, next:[null,null], held:null, canHold:true };
+    P.castleSelIdx = 0; P.confirmed=false; P._selectedCastleIdx=null;
+  }
+  G.screen="match";
+  enterPhase("CASTLESELECT");
+}
+function startMatch(){
+  G.match = { roundWins:[0,0], roundIndex:0, suddenDeath:false };
+  startRound(true);
+}
+
+/* =========================================================================
+   INPUT HANDLING PER SCREEN
+   ========================================================================= */
+function handleInput(dtMs){
+  if(G.screen==="title"){
+    if(anyConfirmPressed()){ audioInit(); G.screen="settings"; }
+    return;
+  }
+  if(G.screen==="settings"){
+    if(anyPlayerAction("fire") || anyPlayerAction("holdPwr") || anyRawPadButtonPressed(0) || anyRawPadButtonPressed(3) || keyPressed("Enter")){ G.screen="join"; }
+    if(anyPlayerAction("rotCW") || anyRawPadButtonPressed(1)) cycleTimerPreset();
+    if(anyPlayerAction("rotCCW") || anyRawPadButtonPressed(2)) G.settings.colorblind = !G.settings.colorblind;
+    return;
+  }
+  if(G.screen==="join"){ updateJoinScreen(); return; }
+  if(G.screen==="mapselect"){
+    handleMapSelectInput();
+    return;
+  }
+  if(G.screen==="match"){ handleMatchInput(dtMs); return; }
+  if(G.screen==="roundend"){
+    if(anyConfirmPressed()){
+      if(G.match.roundWins[0] >= Math.ceil(G.settings.bestOf/2) || G.match.roundWins[1] >= Math.ceil(G.settings.bestOf/2)){
+        G.screen="matchend";
+      } else { startRound(true); }
+    }
+    return;
+  }
+  if(G.screen==="matchend"){
+    if(anyConfirmPressed()){ startMatch(); }
+    return;
+  }
+  if(G.screen==="pause"){
+    handlePauseInput();
+    return;
+  }
+  if(G.screen==="remap"){
+    handleRemapInput();
+    return;
+  }
+}
+function anyRawPadButtonPressed(btnIndex){
+  const pads = getPads();
+  for(let i=0;i<pads.length;i++){
+    const pad = pads[i];
+    if(!pad) continue;
+    if(pad.buttons[btnIndex] && pad.buttons[btnIndex].pressed && !(prevPadButtons[i]||[])[btnIndex]) return true;
+  }
+  return false;
+}
+function anyConfirmPressed(){
+  return G.players.some(p=> p.joined ? actionPressed(p,"fire") : false)
+    || keyPressed("Enter") || keyPressed("Space")
+    || anyRawPadButtonPressed(0);
+}
+function anyPlayerAction(action){
+  return G.players.some(p=> (p.joined && actionPressed(p,action)) );
+}
+let _mapSelIdx=0;
+function handleMapSelectInput(){
+  const P = G.players[0];
+  const d = moveDirPressed(P);
+  if(d && d.dx!==0){ _mapSelIdx = (_mapSelIdx + d.dx + MAPS.length) % MAPS.length; SFX.rotate(); }
+  G.settings.mapId = MAPS[_mapSelIdx].id;
+  if(anyConfirmPressed()){ startMatch(); }
+}
+function cycleTimerPreset(){
+  const opts=[0.75,1.0,1.5];
+  const i = opts.indexOf(G.settings.timerPreset);
+  G.settings.timerPreset = opts[(i+1)%opts.length];
+}
+
+function handlePauseInput(){
+  if(anyPlayerAction("fire")){
+    if(G.pauseReason){ // waiting for reconnect
+      const stillMissing = G.players.some(p=>p._pendingReconnectIndex!=null && p.padIndex===null);
+      if(!stillMissing){ G.pauseReason=null; G.screen = G.pauseFrom||"match"; }
+    } else {
+      G.screen = G.pauseFrom||"match";
+    }
+  }
+  if(anyPlayerAction("holdPwr")){ G.screen="remap"; G.remap={playerIdx:0,actionIdx:0,waiting:false}; }
+  if(anyPlayerAction("rotCCW")){ G.screen="title"; for(const p of G.players){ p.joined=false; p.padIndex=null; p.usesKeyboard=false; } }
+}
+const REMAP_ACTIONS=["fire","rotCW","rotCCW","holdPwr"];
+function handleRemapInput(){
+  const P = G.players[G.remap.playerIdx];
+  if(!G.remap.waiting){
+    const d = moveDirPressed(P);
+    if(d && d.dy!==0){ G.remap.actionIdx = (G.remap.actionIdx + d.dy + REMAP_ACTIONS.length)%REMAP_ACTIONS.length; }
+    if(actionPressed(P,"fire") || keyPressed("Enter")){ G.remap.waiting=true; }
+    if(keyPressed("Escape")){ G.screen="pause"; }
+  } else {
+    if(P.padIndex!=null){
+      const pad = getPads()[P.padIndex];
+      if(pad){
+        for(let b=0;b<pad.buttons.length;b++){
+          if(pad.buttons[b].pressed && !(prevPadButtons[P.padIndex]||[])[b]){
+            P.map[REMAP_ACTIONS[G.remap.actionIdx]] = b;
+            G.remap.waiting=false; SFX.confirm();
+          }
+        }
+      }
+    }
+  }
+}
+
+function handleMatchInput(dtMs){
+  if(anyPlayerActionRaw("pause")){ G.pauseFrom="match"; G.pauseReason=null; G.screen="pause"; return; }
+  const phase = G.round.phase;
+  for(const P of G.players){
+    if(!P.joined) continue;
+    if(phase==="CASTLESELECT"){
+      const d = moveDirPressed(P);
+      const sideCastles = G.board.castles.map((c,i)=>({c,i})).filter(o=>o.c.side===P.id);
+      if(d && !P.confirmed){
+        P.castleSelIdx = (P.castleSelIdx + (d.dx||d.dy) + sideCastles.length) % sideCastles.length;
+      }
+      if(actionPressed(P,"fire") && !P.confirmed){
+        P.confirmed = true;
+        P._selectedCastleIdx = sideCastles[P.castleSelIdx].i;
+        SFX.confirm();
+      }
+    } else if(phase==="ARM"){
+      const d = moveDirPressed(P);
+      if(d){ P.cursor.tx = clampSide(P, P.cursor.tx + d.dx); P.cursor.ty = Math.max(0, Math.min(ROWS-2, P.cursor.ty + d.dy)); }
+      if(actionPressed(P,"rotCW")){ P.armMode = P.armMode==="cannon" ? "powerup" : "cannon"; }
+      if(P.armMode==="powerup" && actionPressed(P,"holdPwr")){ P.powerupSel = (P.powerupSel+1)%3; }
+      if(actionPressed(P,"fire")){
+        if(P._placingSuper){
+          tryPlaceCannon(P, true);
+        } else if(P.armMode==="cannon"){
+          tryPlaceCannon(P, false);
+        } else {
+          const types=["balloon","mega","supercannon"];
+          purchase(P, types[P.powerupSel]);
+        }
+      }
+    } else if(phase==="COMBAT"){
+      updateCombatCursor(P, dtMs);
+      if(actionPressed(P,"fire")){
+        if(P._balloonMode) launchBalloon(P); else fireRequest(P);
+      }
+      if(actionPressed(P,"rotCCW")){ tryBalloonToggle(P); }
+    } else if(phase==="BUILD"){
+      const d = moveDirPressed(P);
+      if(d){ P.cursor.tx = clampSide(P, P.cursor.tx + d.dx); P.cursor.ty = Math.max(0, Math.min(ROWS-1, P.cursor.ty + d.dy)); }
+      if(actionPressed(P,"rotCW")) tryRotate(P,1);
+      if(actionPressed(P,"rotCCW")) tryRotate(P,-1);
+      if(actionPressed(P,"holdPwr")) tryHold(P);
+      if(actionPressed(P,"fire")){
+        if(placementLegal(P)) commitPlacement(P); else SFX.deny();
+      }
+    }
+  }
+}
+function anyPlayerActionRaw(action){
+  return G.players.some(p=>{
+    if(!p.joined) return false;
+    if(p.usesKeyboard) return keyPressed("KeyP");
+    if(p.padIndex==null) return false;
+    return padPressed(p.padIndex, 9);
+  });
+}
+function clampSide(P, tx){
+  const range = P.id===1 ? G.board.map.p1Cols : G.board.map.p2Cols;
+  return Math.max(range[0], Math.min(range[1], tx));
+}
+let cannonIdSeq=1;
+function tryPlaceCannon(P, isSuper){
+  if(isSuper){
+    const c = { id:cannonIdSeq++, owner:P.id, x:P.cursor.tx, y:P.cursor.ty, type:"super", reloadMs:0, active:true };
+    if(!cannonFootprintLegal(P,c)){ SFX.deny(); return; }
+    stampCannonFootprint(G.board,c);
+    G.board.cannons.push(c);
+    P.placedOrder.push(c.id);
+    P._placingSuper=false;
+    P.superPending=true;
+    SFX.place();
+    return;
+  }
+  if(P.allotment<=0){ SFX.deny(); return; }
+  if(activeCannons(P.id).length>=12){ SFX.deny(); return; }
+  const c = { id:cannonIdSeq++, owner:P.id, x:P.cursor.tx, y:P.cursor.ty, type:"normal", reloadMs:0, active:true };
+  if(!cannonFootprintLegal(P,c)){ SFX.deny(); return; }
+  stampCannonFootprint(G.board,c);
+  G.board.cannons.push(c);
+  P.placedOrder.push(c.id);
+  P.allotment--;
+  SFX.place();
+}
+function cannonFootprintLegal(P,c){
+  for(let dx=0;dx<2;dx++) for(let dy=0;dy<2;dy++){
+    const x=c.x+dx,y=c.y+dy;
+    if(!inBounds(x,y)) return false;
+    if(!isSideCol(G.board,x,P.id)) return false;
+    if(tileAt(G.board,x,y)!==LAND) return false;
+    if(G.board.outside[idx(x,y)]) return false;
+  }
+  return true;
+}
+
+/* =========================================================================
+   MAIN LOOP
+   ========================================================================= */
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+function resize(){
+  const scale = Math.min(window.innerWidth/960, window.innerHeight/664);
+  canvas.style.width = Math.floor(960*scale)+"px";
+  canvas.style.height = Math.floor(664*scale)+"px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+let lastTime = performance.now();
+let accumulator = 0;
+const STEP = 1000/60;
+
+function frame(now){
+  requestAnimationFrame(frame);
+  let dt = now - lastTime;
+  lastTime = now;
+  if(dt>250) dt=250;
+  accumulator += dt;
+  let steps=0;
+  while(accumulator>=STEP && steps<5){
+    step(STEP);
+    accumulator -= STEP;
+    steps++;
+  }
+  render();
+}
+function step(dtMs){
+  handleInput(dtMs);
+  if(G.screen==="match"){
+    advancePhaseTimer(dtMs);
+    if(G.round.phase==="COMBAT" || G.round.phase==="COMBAT_GRACE"){
+      updateBalls(dtMs); updateBalloons(dtMs);
+    }
+    for(const c of G.board.cannons) if(c.reloadMs>0) c.reloadMs -= dtMs;
+    for(let i=0;i<G.board.scorch.length;i++) if(G.board.scorch[i]>0) {} // cosmetic decay omitted for perf
+    if(G.fx.shakeMs>0) G.fx.shakeMs -= dtMs;
+    updateParticles(dtMs);
+  }
+  updateMusic(dtMs);
+  snapshotPrevButtons();
+}
+
+/* =========================================================================
+   RENDER MODULE
+   ========================================================================= */
+function render(){
+  ctx.fillStyle = COL_BG;
+  ctx.fillRect(0,0,960,664);
+  if(G.screen==="title") return renderTitle();
+  if(G.screen==="settings") return renderSettings();
+  if(G.screen==="join") return renderJoin();
+  if(G.screen==="mapselect") return renderMapSelect();
+  if(G.screen==="match") return renderMatch();
+  if(G.screen==="roundend") return renderRoundEnd();
+  if(G.screen==="matchend") return renderMatchEnd();
+  if(G.screen==="pause") return renderPause();
+  if(G.screen==="remap") return renderRemap();
+}
+function centerText(txt,y,size,color){
+  ctx.fillStyle = color||COL_TEXT;
+  ctx.font = (size||24)+"px monospace";
+  ctx.textAlign="center";
+  ctx.fillText(txt, 480, y);
+}
+function renderTitle(){
+  centerText("RAMPART VERSUS", 260, 48);
+  centerText("press A / Enter to begin", 340, 20);
+  centerText("2-player local versus — Xbox controllers or keyboard debug", 380, 14, "#999");
+}
+function renderSettings(){
+  centerText("SETTINGS", 100, 32);
+  centerText("Map: "+G.settings.mapId, 200, 18);
+  centerText("Best of: "+G.settings.bestOf, 240, 18);
+  centerText("Max cycles: "+G.settings.maxCycles, 280, 18);
+  centerText("Timer preset (B to cycle): "+G.settings.timerPreset+"x", 320, 18);
+  centerText("Colorblind (X to toggle): "+G.settings.colorblind, 360, 18);
+  centerText("press A / Y to continue to join screen", 440, 18);
+}
+function renderJoin(){
+  centerText("JOIN", 120, 32);
+  for(let i=0;i<2;i++){
+    const P = G.players[i];
+    centerText("P"+(i+1)+": "+(P.joined ? "READY" : "press A on a pad or Enter (keyboard)"), 240+i*60, 18);
+  }
+  centerText(padBanner, 400, 14, "#999");
+}
+function renderMapSelect(){
+  centerText("SELECT MAP", 100, 32);
+  const m = MAPS[_mapSelIdx];
+  centerText("< "+m.name+" >", 240, 24);
+  centerText("P1 dpad/stick to browse, A to start", 320, 16);
+}
+function renderMatch(){
+  ctx.save();
+  if(G.fx.shakeMs>0){
+    const mag=G.fx.shakeMag;
+    ctx.translate((Math.random()-0.5)*mag, (Math.random()-0.5)*mag);
+  }
+  ctx.translate(0, HUD_H);
+  drawBoard();
+  drawFx();
+  drawPhaseSpecific();
+  ctx.restore();
+  drawHUD();
+}
+function drawBoard(){
+  const b=G.board;
+  const pal = G.settings.colorblind ? PAL.cb : PAL.normal;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const t=b.tiles[idx(x,y)];
+    let color;
+    if(t===WATER){ color = (Math.floor(performance.now()/400)%2===0)?COL_WATER:COL_WATER2; }
+    else if(t===ROCK){ color=COL_ROCK; }
+    else { color = COL_LAND[(x*7+y*13)%3]; }
+    ctx.fillStyle=color;
+    ctx.fillRect(x*TILE,y*TILE,TILE,TILE);
+  }
+  // territory tint
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const i=idx(x,y);
+    if(!b.outside[i] && !isSolid(b.tiles[i])){
+      const p1 = x>=b.map.p1Cols[0]&&x<=b.map.p1Cols[1];
+      const p2 = x>=b.map.p2Cols[0]&&x<=b.map.p2Cols[1];
+      if(p1){ ctx.fillStyle=pal.p1tint; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
+      else if(p2){ ctx.fillStyle=pal.p2tint; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
+    }
+    if(b.scorch[i]>0){ ctx.fillStyle="rgba(30,20,10,0.4)"; ctx.fillRect(x*TILE,y*TILE,TILE,TILE); }
+  }
+  // walls
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const i=idx(x,y);
+    if(b.tiles[i]===WALL){
+      ctx.fillStyle = b.wallOwner[i]===1?pal.p1wall:pal.p2wall;
+      ctx.fillRect(x*TILE+1,y*TILE+1,TILE-2,TILE-2);
+    }
+  }
+  // castles
+  for(const c of b.castles){
+    ctx.fillStyle=COL_CASTLE;
+    ctx.fillRect(c.x*TILE,c.y*TILE,3*TILE,3*TILE);
+    ctx.strokeStyle="#555"; ctx.strokeRect(c.x*TILE,c.y*TILE,3*TILE,3*TILE);
+    if(c.enclosedBy){
+      ctx.fillStyle = c.enclosedBy===1?pal.p1wall:pal.p2wall;
+      ctx.fillRect(c.x*TILE+TILE, c.y*TILE-8, 4,8);
+    }
+  }
+  // cannons
+  for(const c of b.cannons){
+    ctx.fillStyle = c.owner===1?pal.p1wall:pal.p2wall;
+    if(c.type==="super"){ ctx.fillStyle="#D4AF37"; }
+    ctx.fillRect(c.x*TILE, c.y*TILE, 2*TILE, 2*TILE);
+    if(c.reloadMs>0){
+      ctx.fillStyle="rgba(0,0,0,0.5)";
+      const frac = c.reloadMs/2000;
+      ctx.fillRect(c.x*TILE, c.y*TILE, 2*TILE, 2*TILE*frac);
+    }
+  }
+}
+function drawFx(){
+  for(const b of G.balls){
+    const f = b.t/b.T;
+    const x = b.x0 + (b.x1-b.x0)*f;
+    const y = b.y0 + (b.y1-b.y0)*f;
+    const arc = Math.sin(Math.PI*f)*b.arcH;
+    ctx.fillStyle="rgba(0,0,0,0.3)"; ctx.beginPath(); ctx.ellipse(x,y,5,2,0,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = b.isSuper?"#D4AF37":"#F2EFE4";
+    ctx.beginPath(); ctx.arc(x,y-arc,b.isSuper?6:3,0,Math.PI*2); ctx.fill();
+  }
+  for(const bl of G.balloons){
+    const f = Math.min(1, bl.t/bl.T);
+    const tx=(bl.target.x+1)*TILE, ty=(bl.target.y+1)*TILE;
+    const x = bl.x0 + (tx-bl.x0)*f, y = bl.y0 + (ty-bl.y0)*f - Math.sin(Math.PI*f)*20;
+    ctx.fillStyle="#EEE"; ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle="#999"; ctx.beginPath(); ctx.moveTo(x,y+5); ctx.lineTo(x,y+10); ctx.stroke();
+  }
+  for(const p of G.fx.particles){
+    ctx.fillStyle="rgba(120,90,60,"+(1-p.t/p.life)+")";
+    ctx.fillRect(p.x,p.y,3,3);
+  }
+  // player cursors
+  for(const P of G.players){
+    if(!P.joined) continue;
+    ctx.strokeStyle = P.id===1 ? "#5AA0FF" : "#FF6060";
+    ctx.lineWidth=2;
+    if(G.round.phase==="COMBAT"){
+      ctx.beginPath(); ctx.arc(P.cursor.px,P.cursor.py,8,0,Math.PI*2); ctx.stroke();
+    } else if(G.round.phase==="ARM"){
+      ctx.strokeRect(P.cursor.tx*TILE, P.cursor.ty*TILE, 2*TILE, 2*TILE);
+    } else if(G.round.phase==="BUILD" && P.piece.cur){
+      const legal = placementLegal(P);
+      ctx.fillStyle = legal ? "rgba(80,220,80,0.5)" : "rgba(220,80,80,0.5)";
+      for(const [dx,dy] of P.piece.cur.cells){
+        const x=P.cursor.tx+dx, y=P.cursor.ty+dy;
+        if(inBounds(x,y)) ctx.fillRect(x*TILE,y*TILE,TILE,TILE);
+      }
+    } else if(G.round.phase==="CASTLESELECT"){
+      const sideCastles = G.board.castles.map((c,i)=>({c,i})).filter(o=>o.c.side===P.id);
+      const sel = sideCastles[P.castleSelIdx];
+      if(sel) ctx.strokeRect(sel.c.x*TILE-2, sel.c.y*TILE-2, 3*TILE+4, 3*TILE+4);
+    }
+  }
+}
+function drawPhaseSpecific(){}
+function drawHUD(){
+  ctx.fillStyle="#101014"; ctx.fillRect(0,0,960,HUD_H);
+  ctx.fillStyle=COL_TEXT; ctx.font="20px monospace"; ctx.textAlign="center";
+  ctx.fillText(G.round.phase + "  " + Math.max(0,Math.ceil(G.round.phaseMs/1000))+"s", 480, 30);
+  ctx.textAlign="left";
+  const p1=G.players[0], p2=G.players[1];
+  ctx.fillStyle="#5AA0FF";
+  ctx.fillText("P1  score:"+p1.score+"  castles:"+G.board.castles.filter(c=>c.side===1&&c.enclosedBy===1).length+"  wins:"+G.match.roundWins[0]+"  inv:"+(p1.inventory||"-"), 10, 20);
+  ctx.fillText("cannons:"+activeCannons(1).length+" allotment:"+p1.allotment, 10, 40);
+  ctx.textAlign="right";
+  ctx.fillStyle="#FF6060";
+  ctx.fillText("P2  score:"+p2.score+"  castles:"+G.board.castles.filter(c=>c.side===2&&c.enclosedBy===2).length+"  wins:"+G.match.roundWins[1]+"  inv:"+(p2.inventory||"-"), 950, 20);
+  ctx.fillText("cannons:"+activeCannons(2).length+" allotment:"+p2.allotment, 950, 40);
+  ctx.textAlign="left";
+}
+function renderRoundEnd(){
+  centerText("ROUND OVER", 260, 36);
+  centerText(G.roundResultText||"", 320, 22);
+  centerText("wins P1:"+G.match.roundWins[0]+"  P2:"+G.match.roundWins[1], 360, 18);
+  centerText("press A to continue", 420, 16);
+}
+function renderMatchEnd(){
+  const winner = G.match.roundWins[0]>G.match.roundWins[1] ? 1 : 2;
+  centerText("MATCH OVER", 260, 36);
+  centerText("Player "+winner+" wins the match!", 320, 24);
+  centerText("press A to rematch", 400, 16);
+}
+function renderPause(){
+  centerText("PAUSED", 260, 36);
+  if(G.pauseReason){ centerText(G.pauseReason, 320, 18, "#FF8080"); }
+  else {
+    centerText("A: resume", 320, 18);
+    centerText("Y: remap controls", 350, 18);
+    centerText("X: quit to title", 380, 18);
+  }
+}
+function renderRemap(){
+  centerText("REMAP  P"+(G.remap.playerIdx+1), 120, 28);
+  for(let i=0;i<REMAP_ACTIONS.length;i++){
+    centerText((i===G.remap.actionIdx?"> ":"  ")+REMAP_ACTIONS[i]+": "+G.players[G.remap.playerIdx].map[REMAP_ACTIONS[i]], 200+i*30, 16);
+  }
+  if(G.remap.waiting) centerText("press new button...", 340, 18, "#FFD060");
+  else centerText("A to select, dpad to move, Esc to exit", 340, 14, "#999");
+}
+
+/* =========================================================================
+   BOOT
+   ========================================================================= */
+G = freshG();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
