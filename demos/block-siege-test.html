@@ -1,0 +1,681 @@
+<title>Block Siege Test</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&display=swap">
+<style>
+/* Layout: full-screen 3D board, thin HUD strips pinned to the top and bottom edges. Single dark look on purpose. */
+:root{
+  --bg:#1a2630;
+  --panel:rgba(18,26,32,.84);
+  --fg:#eef1ec;
+  --muted:#a3b3ac;
+  --accent:#f0a83c;
+  --ok:#7fc77a;
+  --bad:#ef6b5b;
+  --line:rgba(238,241,236,.16);
+  --font:'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color-scheme:dark;
+}
+html,body{height:100%}
+body{background:var(--bg);color:var(--fg);font-family:var(--font);overflow:hidden;-webkit-user-select:none;user-select:none}
+#stage{position:fixed;inset:0}
+#stage canvas{display:block;width:100%;height:100%;touch-action:none;cursor:crosshair}
+.hud-top{position:fixed;top:calc(env(safe-area-inset-top,0px) + 12px);left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));display:flex;justify-content:space-between;align-items:flex-start;gap:12px;pointer-events:none;flex-wrap:wrap}
+.brand{display:flex;flex-direction:column;gap:2px;min-width:0}
+.brand b{font-size:13px;letter-spacing:.14em;text-transform:uppercase;font-weight:700}
+.brand span{font-size:12px;color:var(--muted)}
+.brand .hint{margin-top:4px;font-size:13px;color:var(--fg);opacity:.9;max-width:34ch}
+.status{display:flex;flex-direction:column;align-items:flex-end;gap:6px;font-variant-numeric:tabular-nums}
+.pill{font-size:12px;font-weight:600;letter-spacing:.04em;padding:5px 10px;border-radius:999px;background:var(--panel);border:1px solid var(--line);display:flex;align-items:center;gap:6px}
+.pill i{width:8px;height:8px;border-radius:2px;background:var(--ok);display:inline-block}
+.pill.open i{background:var(--bad)}
+.toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top,0px) + 96px);transform:translateX(-50%);background:var(--panel);border:1px solid var(--line);padding:8px 14px;border-radius:10px;font-size:13px;pointer-events:none;transition:opacity .25s;max-width:calc(100% - 32px);text-align:center}
+.hud-bottom{position:fixed;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);left:max(16px,env(safe-area-inset-left,0px));right:max(16px,env(safe-area-inset-right,0px));display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
+button{font:600 14px var(--font);color:var(--fg);background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 14px;min-height:44px;cursor:pointer;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}
+button[aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button:active{transform:translateY(1px)}
+[hidden]{display:none!important}
+#nogl{position:fixed;inset:0;display:grid;place-items:center;padding:24px;text-align:center;color:var(--muted)}
+</style>
+
+<div id="stage"></div>
+
+<div class="hud-top">
+  <div class="brand">
+    <b>Block Siege</b>
+    <span>Look test, not the game</span>
+    <div class="hint">Tap the wall to fire. Drag sideways to turn the view.</div>
+  </div>
+  <div class="status">
+    <div class="pill" id="encl"><i></i><span id="enclText">Castle enclosed</span></div>
+    <div class="pill" id="wallCount">Wall 28 / 28</div>
+  </div>
+</div>
+
+<div class="toast" id="toast" style="opacity:0"></div>
+
+<div class="hud-bottom">
+  <button id="btnAuto" aria-pressed="true">Auto fire</button>
+  <button id="btnPiece">Place piece</button>
+  <button id="btnReset">Reset</button>
+  <button id="btnSound" aria-pressed="true">Sound on</button>
+</div>
+
+<div id="nogl" hidden>This demo needs 3D graphics (WebGL), and this browser didn't allow it.</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+'use strict';
+const $=s=>document.querySelector(s);
+const reduceMotion=window.matchMedia&&matchMedia('(prefers-reduced-motion: reduce)').matches;
+const rand=(a=0,b=1)=>a+Math.random()*(b-a);
+const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
+
+/* ===== BOARD ===== */
+const W=18,D=20;
+const LAND=0,WATER=1,SHORE=2;
+function cellType(x,z){
+  if(x<0||z<0||x>=W||z>=D) return WATER;
+  if(z>=4&&z<=6) return WATER;
+  if(x===0||x===W-1||z===D-1) return WATER;
+  return z<=3?SHORE:LAND;
+}
+const cx=x=>x-W/2+0.5, cz=z=>z-D/2+0.5;
+const key=(x,z)=>x+','+z;
+const toCell=(px,pz)=>[Math.floor(px+W/2),Math.floor(pz+D/2)];
+const CASTLE=new Set([key(8,12),key(9,12),key(8,13),key(9,13)]);
+const RING=[];
+for(let x=5;x<=12;x++)for(let z=9;z<=16;z++) if(x===5||x===12||z===9||z===16) RING.push([x,z]);
+const inRingBox=(x,z)=>x>=5&&x<=12&&z>=9&&z<=16;
+const nearCastle=(x,z)=>x>=7&&x<=10&&z>=11&&z<=14;
+const DIRS=[[1,0],[-1,0],[0,1],[0,-1]];
+
+/* ===== RENDERER ===== */
+let renderer;
+try{
+  renderer=new THREE.WebGLRenderer({antialias:true});
+  if(!renderer.getContext()) throw new Error('no gl');
+}catch(e){ $('#nogl').hidden=false; return; }
+const coarse=window.matchMedia&&matchMedia('(pointer: coarse)').matches;
+renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,2));
+renderer.shadowMap.enabled=true;
+renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+$('#stage').appendChild(renderer.domElement);
+
+const scene=new THREE.Scene();
+const BG=new THREE.Color('#1a2630');
+scene.background=BG;
+scene.fog=new THREE.Fog(BG,42,90);
+
+const camera=new THREE.PerspectiveCamera(38,1,0.1,200);
+scene.add(new THREE.HemisphereLight('#d6e6ff','#3b3222',0.55));
+const sun=new THREE.DirectionalLight('#fff0d4',0.95);
+sun.position.set(10,22,-7);
+sun.castShadow=true;
+sun.shadow.mapSize.set(coarse?1024:2048,coarse?1024:2048);
+Object.assign(sun.shadow.camera,{left:-16,right:16,top:16,bottom:-16,near:1,far:70});
+sun.shadow.bias=-0.0006; sun.shadow.normalBias=0.02;
+scene.add(sun);
+const flash=new THREE.PointLight('#ffb15a',0,7,2);
+scene.add(flash);
+let flashI=0;
+
+const dummy=new THREE.Object3D();
+const HIDE=new THREE.Matrix4().compose(new THREE.Vector3(0,-999,0),new THREE.Quaternion(),new THREE.Vector3(.001,.001,.001));
+const C=h=>new THREE.Color(h);
+const boxGeo=new THREE.BoxGeometry(1,1,1);
+
+/* ===== GROUND ===== */
+const groundCells=[];
+for(let z=0;z<D;z++)for(let x=0;x<W;x++) if(cellType(x,z)!==WATER) groundCells.push([x,z]);
+const ground=new THREE.InstancedMesh(boxGeo,new THREE.MeshStandardMaterial({roughness:.95,metalness:0}),groundCells.length);
+const groundIndex=new Map(), groundBase=[];
+groundCells.forEach(([x,z],i)=>{
+  dummy.position.set(cx(x),-0.5,cz(z)); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1); dummy.updateMatrix();
+  ground.setMatrixAt(i,dummy.matrix);
+  const t=cellType(x,z);
+  const c=t===SHORE?C('#c9b98f'):(inRingBox(x,z)?C('#8ba86b'):C('#6f8f58'));
+  c.offsetHSL(rand(-.01,.01),0,rand(-.035,.035));
+  groundBase[i]=c.clone(); ground.setColorAt(i,c); groundIndex.set(key(x,z),i);
+});
+ground.receiveShadow=true; ground.castShadow=true;
+scene.add(ground);
+
+/* water: a gently moving faceted sheet */
+const waterGeo=new THREE.PlaneGeometry(70,70,56,56); waterGeo.rotateX(-Math.PI/2);
+const waterMat=new THREE.MeshStandardMaterial({color:'#2e7088',roughness:.35,metalness:.05,flatShading:true});
+const water=new THREE.Mesh(waterGeo,waterMat);
+water.position.y=-0.35; water.receiveShadow=true;
+scene.add(water);
+const wPos=waterGeo.attributes.position;
+const wBase=new Float32Array(wPos.count*2);
+for(let i=0;i<wPos.count;i++){wBase[i*2]=wPos.getX(i);wBase[i*2+1]=wPos.getZ(i);}
+
+/* ===== WALLS (each cell = 8 stone half-blocks) ===== */
+const WALL_CAP=8*110;
+const wallMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(.48,.48,.48),new THREE.MeshStandardMaterial({roughness:.9,metalness:0}),WALL_CAP);
+wallMesh.castShadow=wallMesh.receiveShadow=true; wallMesh.frustumCulled=false;
+const STONE=C('#a7a296');
+const wallFree=[], wallCellOf=new Array(WALL_CAP).fill(null);
+for(let i=WALL_CAP-1;i>=0;i--){wallFree.push(i);wallMesh.setMatrixAt(i,HIDE);wallMesh.setColorAt(i,STONE);}
+scene.add(wallMesh);
+const walls=new Map();
+function addWall(x,z){
+  const k=key(x,z); if(walls.has(k)||!wallFree.length) return;
+  const idx=[];
+  for(let i=0;i<8;i++){
+    const id=wallFree.pop(); idx.push(id); wallCellOf[id]=k;
+    const ox=(i&1)?.25:-.25, oy=(i&2)?.75:.25, oz=(i&4)?.25:-.25;
+    dummy.position.set(cx(x)+ox,oy,cz(z)+oz); dummy.rotation.set(0,0,0); dummy.scale.set(1,1,1); dummy.updateMatrix();
+    wallMesh.setMatrixAt(id,dummy.matrix);
+    const c=STONE.clone().offsetHSL(rand(-.01,.01),rand(-.03,.03),rand(-.06,.05)+((i&2)?.03:-.02));
+    wallMesh.setColorAt(id,c);
+  }
+  walls.set(k,{x,z,idx});
+  wallMesh.instanceMatrix.needsUpdate=true; wallMesh.instanceColor.needsUpdate=true;
+}
+const _m=new THREE.Matrix4(), _p=new THREE.Vector3(), _q=new THREE.Quaternion(), _s=new THREE.Vector3(), _col=new THREE.Color();
+function removeWall(k){
+  const w=walls.get(k); if(!w) return [];
+  const out=[];
+  for(const id of w.idx){
+    wallMesh.getMatrixAt(id,_m); _m.decompose(_p,_q,_s);
+    wallMesh.getColorAt(id,_col);
+    out.push({p:_p.clone(),c:_col.clone()});
+    wallMesh.setMatrixAt(id,HIDE); wallCellOf[id]=null; wallFree.push(id);
+  }
+  walls.delete(k);
+  wallMesh.instanceMatrix.needsUpdate=true;
+  return out;
+}
+
+/* ===== CASTLE ===== */
+const castleParts=[];
+(function(){
+  const ox=0, oz=cz(12)+0.5; // centre of the 2x2 castle cells
+  const stone=C('#bdb6a6'), trim=C('#8c867a'), dark=C('#2c2a27'), roof=C('#9b5a3c');
+  const add=(x,y,z,c)=>castleParts.push({x:ox+x,y,z:oz+z,c:c.clone().offsetHSL(0,0,rand(-.04,.04))});
+  const g=[-.75,-.25,.25,.75];
+  for(let ly=0;ly<6;ly++) for(const x of g) for(const z of g){
+    const edge=Math.abs(x)===.75||Math.abs(z)===.75;
+    if(!edge&&ly<5) continue;
+    let c=ly===0?trim:stone;
+    if(ly===3&&edge&&((Math.abs(x)===.75&&Math.abs(z)===.25)||(Math.abs(z)===.75&&Math.abs(x)===.25))) c=dark;
+    if(ly===2&&z===-.75&&Math.abs(x)===.25) c=dark; // gate
+    add(x,.25+ly*.5,z,c);
+  }
+  for(const x of g) for(const z of g){
+    const edge=Math.abs(x)===.75||Math.abs(z)===.75;
+    if(edge&&((x+z)*2+4)%2===0) add(x,3.25,z,trim); // crenels
+  }
+  for(let ly=0;ly<3;ly++) for(const x of [-.25,.25]) for(const z of [-.25,.25]) add(x,3.25+ly*.5,z,ly===2?roof:stone);
+  add(0,4.75,0,roof);
+})();
+const castleMesh=new THREE.InstancedMesh(new THREE.BoxGeometry(.49,.49,.49),new THREE.MeshStandardMaterial({roughness:.85}),castleParts.length);
+castleParts.forEach((b,i)=>{dummy.position.set(b.x,b.y,b.z);dummy.rotation.set(0,0,0);dummy.scale.set(1,1,1);dummy.updateMatrix();castleMesh.setMatrixAt(i,dummy.matrix);castleMesh.setColorAt(i,b.c);});
+castleMesh.castShadow=castleMesh.receiveShadow=true;
+scene.add(castleMesh);
+const pole=new THREE.Mesh(new THREE.BoxGeometry(.06,1.1,.06),new THREE.MeshStandardMaterial({color:'#4a4038'}));
+pole.position.set(0,5.5,cz(12)+0.5); pole.castShadow=true; scene.add(pole);
+const flag=new THREE.Mesh(new THREE.BoxGeometry(.5,.3,.04),new THREE.MeshStandardMaterial({color:'#3f7fd9',roughness:.7}));
+flag.position.set(.28,5.85,cz(12)+0.5); flag.castShadow=true; scene.add(flag);
+
+/* ===== ATTACKING CANNONS ===== */
+const woodMat=new THREE.MeshStandardMaterial({color:'#6b4a33',roughness:.9});
+const ironMat=new THREE.MeshStandardMaterial({color:'#3a3f46',roughness:.5,metalness:.4});
+const darkMat=new THREE.MeshStandardMaterial({color:'#24272b',roughness:.6});
+function makeCannon(gx,gz){
+  const g=new THREE.Group(); g.position.set(cx(gx),0,cz(gz));
+  const cube=(s,mat,x,y,z,parent)=>{const m=new THREE.Mesh(new THREE.BoxGeometry(s,s,s),mat);m.position.set(x,y,z);m.castShadow=m.receiveShadow=true;(parent||g).add(m);return m;};
+  for(const x of [-.22,.22]) for(const z of [-.22,.22]) cube(.44,woodMat,x,.22,z);
+  for(const x of [-.5,.5]) for(const z of [-.24,.24]) cube(.26,darkMat,x,.16,z);
+  const pivot=new THREE.Group(); pivot.position.set(0,.62,0); pivot.rotation.order='YXZ'; g.add(pivot);
+  const barrel=new THREE.Group(); pivot.add(barrel);
+  cube(.36,ironMat,0,0,-.2,barrel); cube(.34,ironMat,0,0,.14,barrel); cube(.32,ironMat,0,0,.46,barrel); cube(.4,darkMat,0,0,.74,barrel);
+  scene.add(g);
+  return {g,pivot,barrel,recoil:0};
+}
+const cannons=[makeCannon(5,2),makeCannon(12,2)];
+cannons.forEach(c=>{c.pivot.rotation.set(-.45,0,0);});
+let nextCannon=0;
+
+/* ===== PARTICLES ===== */
+function makePool(cap,mat,shadow){
+  const mesh=new THREE.InstancedMesh(boxGeo,mat,cap);
+  mesh.frustumCulled=false; mesh.castShadow=!!shadow; mesh.receiveShadow=!!shadow;
+  const white=C('#ffffff');
+  for(let i=0;i<cap;i++){mesh.setMatrixAt(i,HIDE);mesh.setColorAt(i,white);}
+  scene.add(mesh);
+  const items=[]; for(let i=0;i<cap;i++) items.push({alive:false});
+  return {mesh,items,cap,cursor:0};
+}
+function take(pool){
+  for(let n=0;n<pool.cap;n++){
+    const i=(pool.cursor+n)%pool.cap;
+    if(!pool.items[i].alive){pool.cursor=(i+1)%pool.cap;return pool.items[i];}
+  }
+  // full: recycle the oldest settled one, else overwrite cursor
+  let best=null;
+  for(const it of pool.items) if(it.state===1&&(!best||it.born<best.born)) best=it;
+  const it=best||pool.items[pool.cursor];
+  pool.cursor=(pool.cursor+1)%pool.cap;
+  return it;
+}
+const debris=makePool(coarse?520:800,new THREE.MeshStandardMaterial({roughness:.9}),true);
+const smoke=makePool(420,new THREE.MeshLambertMaterial(),false);
+const fire=makePool(260,new THREE.MeshBasicMaterial({toneMapped:false}),false);
+let clock=0;
+
+function spawnDebris(p,v,size,color){
+  const d=take(debris);
+  Object.assign(d,{alive:true,state:0,p:p.clone(),v:v.clone(),r:new THREE.Vector3(rand(0,6),rand(0,6),rand(0,6)),
+    w:new THREE.Vector3(rand(-9,9),rand(-9,9),rand(-9,9)),s:size,s0:size,c:color.clone(),t:0,born:clock});
+}
+function spawnSmoke(p,v,s0,s1,life,color,opts={}){
+  const d=take(smoke);
+  Object.assign(d,{alive:true,p:p.clone(),v:v.clone(),s0,s1,life,t:0,c:color.clone(),grav:opts.grav||0,drag:opts.drag==null?1.6:opts.drag,spin:rand(-2,2),r:rand(0,6)});
+}
+function spawnFire(p,v,s0,life,hot){
+  const d=take(fire);
+  Object.assign(d,{alive:true,p:p.clone(),v:v.clone(),s0,life,t:0,hot:hot||0,r:rand(0,6)});
+}
+
+/* ===== AUDIO (generated, no files) ===== */
+let ac=null,master=null,noiseBuf=null,soundOn=true;
+function ensureAudio(){
+  try{
+    if(!ac){
+      const AC=window.AudioContext||window.webkitAudioContext; if(!AC) return;
+      ac=new AC(); master=ac.createGain(); master.gain.value=.7; master.connect(ac.destination);
+      noiseBuf=ac.createBuffer(1,ac.sampleRate*2,ac.sampleRate);
+      const d=noiseBuf.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
+    }
+    if(ac.state==='suspended') ac.resume();
+  }catch(e){}
+}
+function noise({dur=.5,vol=.4,type='lowpass',f0=1200,f1=150,q=.7,delay=0}){
+  if(!ac||!soundOn) return;
+  try{
+    const t=ac.currentTime+delay, s=ac.createBufferSource(); s.buffer=noiseBuf;
+    const f=ac.createBiquadFilter(); f.type=type; f.Q.value=q;
+    f.frequency.setValueAtTime(f0,t); f.frequency.exponentialRampToValueAtTime(Math.max(40,f1),t+dur);
+    const g=ac.createGain(); g.gain.setValueAtTime(.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+.008); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    s.connect(f); f.connect(g); g.connect(master); s.start(t,Math.random()*1.2); s.stop(t+dur+.05);
+  }catch(e){}
+}
+function tone({f0=90,f1=40,dur=.4,vol=.4,type='sine',delay=0}){
+  if(!ac||!soundOn) return;
+  try{
+    const t=ac.currentTime+delay, o=ac.createOscillator(); o.type=type;
+    o.frequency.setValueAtTime(f0,t); o.frequency.exponentialRampToValueAtTime(Math.max(20,f1),t+dur);
+    const g=ac.createGain(); g.gain.setValueAtTime(.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+.01); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t+dur+.05);
+  }catch(e){}
+}
+const sfx={
+  fire(){noise({dur:.35,vol:.3,f0:2200,f1:200});tone({f0:130,f1:50,dur:.25,vol:.3});},
+  wall(){noise({dur:.75,vol:.55,f0:1500,f1:110});tone({f0:85,f1:32,dur:.55,vol:.6});
+    for(let i=0;i<7;i++) noise({dur:rand(.05,.1),vol:.12,type:'bandpass',f0:rand(1400,3800),f1:900,q:3,delay:.14+i*.07+rand(0,.05)});},
+  ground(){noise({dur:.6,vol:.45,f0:900,f1:90});tone({f0:75,f1:30,dur:.45,vol:.5});},
+  splash(){noise({dur:.7,vol:.3,type:'highpass',f0:500,f1:2600});noise({dur:.3,vol:.25,f0:700,f1:120});},
+  place(){tone({f0:190,f1:85,dur:.18,vol:.4,type:'triangle'});noise({dur:.18,vol:.25,f0:700,f1:150});}
+};
+
+/* ===== SHOTS ===== */
+const ballGeo=new THREE.BoxGeometry(.3,.3,.3);
+const balls=[];
+let shots=0;
+const _v=new THREE.Vector3();
+function fireAt(target){
+  // target: {kind, point:Vector3, cellKey}
+  const cn=cannons[nextCannon]; nextCannon=(nextCannon+1)%cannons.length;
+  const base=cn.g.position;
+  const yaw=Math.atan2(target.point.x-base.x,target.point.z-base.z);
+  cn.pivot.rotation.set(-.45,yaw,0);
+  cn.pivot.updateMatrixWorld(true);
+  const muzzle=cn.barrel.localToWorld(new THREE.Vector3(0,0,.95));
+  cn.recoil=1;
+  const dir=new THREE.Vector3(Math.sin(yaw),.55,Math.cos(yaw)).normalize();
+  for(let i=0;i<8;i++) spawnFire(muzzle,dir.clone().multiplyScalar(rand(2,5)).add(new THREE.Vector3(rand(-1,1),rand(-.5,1),rand(-1,1))),rand(.15,.28),rand(.12,.25),1);
+  for(let i=0;i<6;i++) spawnSmoke(muzzle,dir.clone().multiplyScalar(rand(.8,2)).add(new THREE.Vector3(rand(-.4,.4),rand(0,.6),rand(-.4,.4))),.2,rand(.45,.7),rand(.9,1.4),C('#cfc8bd').offsetHSL(0,0,rand(-.08,.05)));
+  sfx.fire();
+  const m=new THREE.Mesh(ballGeo,darkMat); m.castShadow=true; scene.add(m);
+  const dist=muzzle.distanceTo(target.point);
+  balls.push({m,s:muzzle.clone(),e:target.point.clone(),t:0,T:.55+dist*.04,h:2.5+dist*.16,target,spin:new THREE.Vector3(rand(4,9),rand(4,9),0)});
+  shots++;
+}
+function updateBalls(dt){
+  for(let i=balls.length-1;i>=0;i--){
+    const b=balls[i]; b.t+=dt; const u=Math.min(1,b.t/b.T);
+    b.m.position.lerpVectors(b.s,b.e,u); b.m.position.y+=4*b.h*u*(1-u);
+    b.m.rotation.x+=b.spin.x*dt; b.m.rotation.y+=b.spin.y*dt;
+    if(Math.random()<.5) spawnSmoke(b.m.position,new THREE.Vector3(rand(-.2,.2),rand(0,.3),rand(-.2,.2)),.1,.25,.5,C('#b9b3a8'),{drag:2});
+    if(u>=1){
+      const travel=new THREE.Vector3().subVectors(b.e,b.s).setY(0).normalize();
+      scene.remove(b.m); balls.splice(i,1); impact(b.target,travel);
+    }
+  }
+}
+
+/* ===== EXPLOSIONS ===== */
+let shake=0;
+const FIRE_A=C('#fff3b0'),FIRE_B=C('#ff8a2a'),FIRE_C=C('#7a2412');
+function boom(p,big){
+  flash.position.set(p.x,p.y+.8,p.z); flashI=big?7:4.5;
+  shake=Math.min(1,shake+(big?.42:.28));
+  spawnFire(p,new THREE.Vector3(),big?1.1:.8,.16,2);
+  const n=big?14:10;
+  for(let i=0;i<n;i++){const a=rand(0,Math.PI*2),sp=rand(1.5,5);spawnFire(p,new THREE.Vector3(Math.cos(a)*sp,rand(1.5,5),Math.sin(a)*sp),rand(.18,.34),rand(.22,.45),0);}
+  for(let i=0;i<(big?11:8);i++){const a=rand(0,Math.PI*2),sp=rand(.3,1.4);
+    spawnSmoke(p.clone().add(new THREE.Vector3(rand(-.3,.3),rand(0,.3),rand(-.3,.3))),new THREE.Vector3(Math.cos(a)*sp,rand(.8,2),Math.sin(a)*sp),.3,rand(.7,1.1),rand(1.3,2.2),C('#8d8780').offsetHSL(0,0,rand(-.12,.06)));}
+}
+function impact(t,travel){
+  const p=t.point;
+  if(t.kind==='wall'&&walls.has(t.cellKey)){
+    const parts=removeWall(t.cellKey);
+    boom(new THREE.Vector3(p.x,.6,p.z),true);
+    for(const part of parts){
+      const away=new THREE.Vector3(part.p.x-p.x,0,part.p.z-p.z).normalize().multiplyScalar(rand(1.2,3.2)).add(travel.clone().multiplyScalar(rand(.8,2.2)));
+      away.y=rand(3,6.5)+(part.p.y>.5?1.2:0);
+      spawnDebris(part.p,away,.48,part.c);
+    }
+    for(let i=0;i<16;i++){
+      const a=rand(0,Math.PI*2),sp=rand(1.5,5);
+      const v=new THREE.Vector3(Math.cos(a)*sp,rand(3,8),Math.sin(a)*sp).add(travel.clone().multiplyScalar(rand(0,2)));
+      spawnDebris(new THREE.Vector3(p.x+rand(-.3,.3),rand(.2,.9),p.z+rand(-.3,.3)),v,rand(.1,.24),STONE.clone().offsetHSL(0,0,rand(-.12,.06)));
+    }
+    sfx.wall(); updateStatus();
+  }else if(t.kind==='water'){
+    flashI=0; shake=Math.min(1,shake+.12);
+    for(let i=0;i<18;i++){const a=rand(0,Math.PI*2),sp=rand(.3,1.6);
+      spawnSmoke(new THREE.Vector3(p.x,-.3,p.z),new THREE.Vector3(Math.cos(a)*sp,rand(4,8),Math.sin(a)*sp),rand(.15,.3),rand(.12,.22),rand(.6,1),C('#dff2f7').offsetHSL(0,0,rand(-.1,0)),{grav:-16,drag:.3});}
+    for(let i=0;i<8;i++){const a=i/8*Math.PI*2;spawnSmoke(new THREE.Vector3(p.x,-.3,p.z),new THREE.Vector3(Math.cos(a)*2.2,.2,Math.sin(a)*2.2),.25,.4,.7,C('#cfe9f1'),{drag:3});}
+    sfx.splash();
+  }else{
+    boom(new THREE.Vector3(p.x,p.y+.15,p.z),false);
+    const [gx,gz]=toCell(p.x,p.z), gi=groundIndex.get(key(gx,gz));
+    if(gi!=null&&t.kind==='ground'){
+      ground.getColorAt(gi,_col); _col.lerp(C('#3b3527'),.45); ground.setColorAt(gi,_col); ground.instanceColor.needsUpdate=true;
+      const dirt=cellType(gx,gz)===SHORE?C('#a8915f'):C('#6a5a3e');
+      for(let i=0;i<9;i++){const a=rand(0,Math.PI*2),sp=rand(1,3.5);
+        spawnDebris(new THREE.Vector3(p.x,.1,p.z),new THREE.Vector3(Math.cos(a)*sp,rand(3,6),Math.sin(a)*sp),rand(.1,.2),dirt.clone().offsetHSL(0,0,rand(-.08,.06)));}
+    }else if(t.kind==='castle'){
+      for(let i=0;i<6;i++){const a=rand(0,Math.PI*2),sp=rand(1,3);
+        spawnDebris(p,new THREE.Vector3(Math.cos(a)*sp,rand(2,4),Math.sin(a)*sp),rand(.1,.18),C('#bdb6a6').offsetHSL(0,0,rand(-.1,.05)));}
+    }
+    sfx.ground();
+  }
+}
+
+/* surface height under a point: null means water */
+function surfaceAt(px,pz){
+  const [gx,gz]=toCell(px,pz), k=key(gx,gz);
+  if(walls.has(k)) return 1;
+  if(CASTLE.has(k)) return 3;
+  return cellType(gx,gz)===WATER?null:0;
+}
+
+const _hv=new THREE.Vector3();
+function updateDebris(dt){
+  const items=debris.items, mesh=debris.mesh;
+  for(let i=0;i<debris.cap;i++){
+    const d=items[i];
+    if(!d.alive){mesh.setMatrixAt(i,HIDE);continue;}
+    d.t+=dt;
+    const half=d.s/2;
+    if(d.state===0){ // flying
+      d.v.y-=20*dt;
+      const ox=d.p.x, oz=d.p.z, oy=d.p.y;
+      d.p.addScaledVector(d.v,dt);
+      d.r.addScaledVector(d.w,dt);
+      let surf=surfaceAt(d.p.x,d.p.z);
+      if(surf!=null&&surf>oy-half+.05&&d.p.y-half<surf){ // hit the side of something taller: bounce back
+        d.p.x=ox; d.p.z=oz; d.v.x*=-.3; d.v.z*=-.3; surf=surfaceAt(d.p.x,d.p.z);
+      }
+      if(surf==null){
+        if(d.p.y<-.3){ d.state=3; d.t=0; d.v.multiplyScalar(.08);
+          if(d.s>.3) spawnSmoke(new THREE.Vector3(d.p.x,-.3,d.p.z),new THREE.Vector3(0,2.5,0),.12,.16,.4,C('#dff2f7'),{grav:-12,drag:.4}); }
+      }else if(d.p.y-half<surf){
+        d.p.y=surf+half;
+        if(d.v.y<-1.6){ d.v.y=-d.v.y*.3; d.v.x*=.55; d.v.z*=.55; d.w.multiplyScalar(.5);}
+        else{ d.v.y=0; const f=Math.pow(.004,dt); d.v.x*=f; d.v.z*=f; d.w.multiplyScalar(f);
+          if(Math.hypot(d.v.x,d.v.z)<.25){d.state=1;d.v.set(0,0,0);} }
+      }
+    }else if(d.state===1){ // resting rubble: lie flat, fall again if support vanishes
+      const q=Math.PI/2, k=Math.min(1,dt*10);
+      d.r.x+=(Math.round(d.r.x/q)*q-d.r.x)*k; d.r.z+=(Math.round(d.r.z/q)*q-d.r.z)*k;
+      const surf=surfaceAt(d.p.x,d.p.z);
+      if(surf==null||d.p.y-half>surf+.02){d.state=0;d.w.set(rand(-2,2),0,rand(-2,2));}
+      else d.p.y+=(surf+half-d.p.y)*k;
+    }else if(d.state===2){ // clearing away
+      d.s=Math.max(0,d.s-dt*d.s0*3); if(d.s<=.001) d.alive=false;
+    }else if(d.state===3){ // sinking
+      d.p.y-=dt*.6; d.s=Math.max(0,d.s-dt*d.s0*1.4); if(d.s<=.001) d.alive=false;
+    }
+    if(!d.alive){mesh.setMatrixAt(i,HIDE);continue;}
+    dummy.position.copy(d.p); dummy.rotation.set(d.r.x,d.r.y,d.r.z); dummy.scale.setScalar(d.s); dummy.updateMatrix();
+    mesh.setMatrixAt(i,dummy.matrix); mesh.setColorAt(i,d.c);
+  }
+  mesh.instanceMatrix.needsUpdate=true; mesh.instanceColor.needsUpdate=true;
+}
+function updateSmoke(dt){
+  const items=smoke.items, mesh=smoke.mesh;
+  for(let i=0;i<smoke.cap;i++){
+    const d=items[i];
+    if(!d.alive){mesh.setMatrixAt(i,HIDE);continue;}
+    d.t+=dt; const u=d.t/d.life;
+    if(u>=1){d.alive=false;mesh.setMatrixAt(i,HIDE);continue;}
+    d.v.y+=d.grav*dt; d.v.multiplyScalar(Math.max(0,1-d.drag*dt)); d.p.addScaledVector(d.v,dt);
+    if(d.grav<0&&d.p.y<-.35){d.alive=false;mesh.setMatrixAt(i,HIDE);continue;}
+    d.r+=d.spin*dt;
+    let s=d.s0+(d.s1-d.s0)*Math.min(1,u*3); if(u>.55) s*=1-(u-.55)/.45;
+    dummy.position.copy(d.p); dummy.rotation.set(d.r*.7,d.r,0); dummy.scale.setScalar(Math.max(.001,s)); dummy.updateMatrix();
+    mesh.setMatrixAt(i,dummy.matrix); mesh.setColorAt(i,d.c);
+  }
+  mesh.instanceMatrix.needsUpdate=true; mesh.instanceColor.needsUpdate=true;
+}
+function updateFire(dt){
+  const items=fire.items, mesh=fire.mesh;
+  for(let i=0;i<fire.cap;i++){
+    const d=items[i];
+    if(!d.alive){mesh.setMatrixAt(i,HIDE);continue;}
+    d.t+=dt; const u=d.t/d.life;
+    if(u>=1){d.alive=false;mesh.setMatrixAt(i,HIDE);continue;}
+    d.v.y-=4*dt; d.v.multiplyScalar(Math.max(0,1-3*dt)); d.p.addScaledVector(d.v,dt); d.r+=dt*5;
+    if(u<.4) _col.copy(FIRE_A).lerp(FIRE_B,u/.4); else _col.copy(FIRE_B).lerp(FIRE_C,(u-.4)/.6);
+    if(d.hot===2) _col.copy(FIRE_A);
+    const s=d.hot===2?d.s0*(.6+u*.8)*(1-u):d.s0*(1-u);
+    dummy.position.copy(d.p); dummy.rotation.set(d.r,d.r*.6,0); dummy.scale.setScalar(Math.max(.001,s)); dummy.updateMatrix();
+    mesh.setMatrixAt(i,dummy.matrix); mesh.setColorAt(i,_col);
+  }
+  mesh.instanceMatrix.needsUpdate=true; mesh.instanceColor.needsUpdate=true;
+}
+
+/* ===== PIECE PLACEMENT ===== */
+let piece=null;
+const pieceMat=new THREE.MeshStandardMaterial({color:'#b3ad9f',roughness:.85});
+const ghostMat=new THREE.MeshBasicMaterial({color:'#f0a83c',transparent:true,opacity:.45,depthWrite:false});
+const ghostGeo=new THREE.PlaneGeometry(.94,.94); ghostGeo.rotateX(-Math.PI/2);
+function placePiece(){
+  if(piece) return;
+  const missing=RING.filter(([x,z])=>!walls.has(key(x,z)));
+  if(!missing.length){toast('The wall is whole. Knock a hole in it first.');return;}
+  const ringMissing=new Set(missing.map(([x,z])=>key(x,z)));
+  const start=missing[Math.floor(Math.random()*missing.length)];
+  const cells=[start], inPiece=new Set([key(...start)]);
+  const want=Math.random()<.5?3:4;
+  while(cells.length<want){
+    const cand=[];
+    for(const [x,z] of cells) for(const [dx,dz] of DIRS){
+      const nx=x+dx,nz=z+dz,k=key(nx,nz);
+      if(inPiece.has(k)||walls.has(k)||CASTLE.has(k)) continue;
+      if(ringMissing.has(k)) cand.push([nx,nz,0]);
+      else if(inRingBox(nx,nz)&&!nearCastle(nx,nz)&&cellType(nx,nz)===LAND) cand.push([nx,nz,1]);
+    }
+    if(!cand.length) break;
+    const best=Math.min(...cand.map(c=>c[2]));
+    const pool=cand.filter(c=>c[2]===best), pick=pool[Math.floor(Math.random()*pool.length)];
+    cells.push([pick[0],pick[1]]); inPiece.add(key(pick[0],pick[1]));
+  }
+  let mx=0,mz=0; for(const [x,z] of cells){mx+=cx(x);mz+=cz(z);} mx/=cells.length; mz/=cells.length;
+  const group=new THREE.Group(); group.position.set(mx,7,mz);
+  for(const [x,z] of cells) for(let i=0;i<8;i++){
+    const m=new THREE.Mesh(new THREE.BoxGeometry(.48,.48,.48),pieceMat); m.castShadow=true;
+    m.position.set(cx(x)-mx+((i&1)?.25:-.25),(i&2)?.75:.25,cz(z)-mz+((i&4)?.25:-.25)); group.add(m);
+  }
+  group.scale.setScalar(.01); group.rotation.y=Math.PI/2; scene.add(group);
+  const ghosts=cells.map(([x,z])=>{const g=new THREE.Mesh(ghostGeo,ghostMat);g.position.set(cx(x),.02,cz(z));scene.add(g);return g;});
+  // clear rubble sitting where the piece will land
+  for(const d of debris.items) if(d.alive&&d.state!==3){const [gx,gz]=toCell(d.p.x,d.p.z); if(inPiece.has(key(gx,gz))){d.state=2;}}
+  piece={cells,group,ghosts,t:0,mx,mz};
+}
+function updatePiece(dt){
+  if(!piece) return;
+  piece.t+=dt; const t=piece.t, g=piece.group;
+  ghostMat.opacity=.3+.2*Math.sin(t*14);
+  if(t<.2){ g.scale.setScalar(Math.max(.01,t/.2)); }
+  else if(t<.5){ g.scale.setScalar(1); g.rotation.y=Math.PI/2*(1-easeOut((t-.2)/.3)); }
+  else if(t<.88){ g.rotation.y=0; const u=(t-.5)/.38; g.position.y=7*(1-u*u); }
+  else{
+    scene.remove(g); piece.ghosts.forEach(m=>scene.remove(m));
+    for(const [x,z] of piece.cells){
+      addWall(x,z);
+      for(let i=0;i<4;i++){const a=rand(0,Math.PI*2);spawnSmoke(new THREE.Vector3(cx(x)+Math.cos(a)*.5,.1,cz(z)+Math.sin(a)*.5),new THREE.Vector3(Math.cos(a)*1.2,rand(.2,.6),Math.sin(a)*1.2),.15,rand(.3,.45),rand(.5,.8),C('#cdbf9c'),{drag:2.5});}
+    }
+    shake=Math.min(1,shake+.14); sfx.place(); piece=null; updateStatus();
+  }
+}
+const easeOut=u=>1-Math.pow(1-u,3);
+
+/* ===== ENCLOSURE CHECK (flood fill from the edges) ===== */
+function castleEnclosed(){
+  const seen=new Set(), q=[];
+  for(let x=0;x<W;x++){q.push([x,0]);q.push([x,D-1]);}
+  for(let z=0;z<D;z++){q.push([0,z]);q.push([W-1,z]);}
+  while(q.length){
+    const [x,z]=q.pop(), k=key(x,z);
+    if(x<0||z<0||x>=W||z>=D||seen.has(k)||walls.has(k)) continue;
+    seen.add(k);
+    if(CASTLE.has(k)) return false;
+    for(const [dx,dz] of DIRS) q.push([x+dx,z+dz]);
+  }
+  return true;
+}
+function updateStatus(){
+  const ok=castleEnclosed();
+  $('#encl').classList.toggle('open',!ok);
+  $('#enclText').textContent=ok?'Castle enclosed':'Wall broken';
+  const n=RING.filter(([x,z])=>walls.has(key(x,z))).length;
+  $('#wallCount').textContent='Wall '+n+' / '+RING.length;
+}
+
+/* ===== UI ===== */
+let toastTimer=0;
+function toast(msg){const t=$('#toast');t.textContent=msg;t.style.opacity=1;clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.style.opacity=0,2200);}
+let autoFire=true, autoTimer=1.2;
+function setAuto(v){autoFire=v;$('#btnAuto').setAttribute('aria-pressed',String(v));}
+$('#btnAuto').addEventListener('click',()=>{ensureAudio();setAuto(!autoFire);});
+$('#btnPiece').addEventListener('click',()=>{ensureAudio();placePiece();});
+$('#btnSound').addEventListener('click',()=>{ensureAudio();soundOn=!soundOn;const b=$('#btnSound');b.setAttribute('aria-pressed',String(soundOn));b.textContent=soundOn?'Sound on':'Sound off';});
+$('#btnReset').addEventListener('click',reset);
+function reset(){
+  for(const k of [...walls.keys()]) removeWall(k);
+  RING.forEach(([x,z])=>addWall(x,z));
+  for(const p of [debris,smoke,fire]) p.items.forEach(d=>d.alive=false);
+  balls.forEach(b=>scene.remove(b.m)); balls.length=0;
+  if(piece){scene.remove(piece.group);piece.ghosts.forEach(m=>scene.remove(m));piece=null;}
+  groundBase.forEach((c,i)=>ground.setColorAt(i,c)); ground.instanceColor.needsUpdate=true;
+  shots=0; updateStatus();
+}
+
+function randomTarget(){
+  const list=[...walls.values()];
+  if(list.length&&Math.random()<.75){
+    const w=list[Math.floor(Math.random()*list.length)];
+    return {kind:'wall',point:new THREE.Vector3(cx(w.x),.5,cz(w.z)),cellKey:key(w.x,w.z)};
+  }
+  const x=Math.floor(rand(3,15)), z=Math.floor(rand(7,19));
+  const k=key(x,z);
+  if(CASTLE.has(k)) return randomTarget();
+  if(cellType(x,z)===WATER) return {kind:'water',point:new THREE.Vector3(cx(x),-.35,cz(z))};
+  if(walls.has(k)) return {kind:'wall',point:new THREE.Vector3(cx(x),.5,cz(z)),cellKey:k};
+  return {kind:'ground',point:new THREE.Vector3(cx(x)+rand(-.3,.3),0,cz(z)+rand(-.3,.3))};
+}
+
+/* ===== CAMERA + INPUT ===== */
+const YAW0=Math.PI, PITCH=0.98;
+let yaw=YAW0;
+const camTarget=new THREE.Vector3(0,0,-0.2);
+const camBase=new THREE.Vector3();
+function layoutCamera(){
+  const w=window.innerWidth,h=window.innerHeight,aspect=w/h;
+  camera.aspect=aspect;
+  const tanH=Math.tan(THREE.MathUtils.degToRad(camera.fov/2));
+  const dW=19.5/(2*tanH*aspect), dH=19/(2*tanH);
+  const d=Math.max(dW,dH);
+  camBase.set(camTarget.x+d*Math.cos(PITCH)*Math.sin(yaw),camTarget.y+d*Math.sin(PITCH),camTarget.z+d*Math.cos(PITCH)*Math.cos(yaw));
+  camera.far=d+80; camera.updateProjectionMatrix();
+  renderer.setSize(w,h,false);
+}
+window.addEventListener('resize',layoutCamera);
+
+const raycaster=new THREE.Raycaster(), ndc=new THREE.Vector2();
+const el=renderer.domElement;
+let down=null;
+el.addEventListener('pointerdown',e=>{ensureAudio();down={x:e.clientX,y:e.clientY,yaw0:yaw,moved:false};try{el.setPointerCapture(e.pointerId);}catch(_){}} );
+el.addEventListener('pointermove',e=>{
+  if(!down) return;
+  const dx=e.clientX-down.x, dy=e.clientY-down.y;
+  if(!down.moved&&Math.hypot(dx,dy)>8) down.moved=true;
+  if(down.moved){yaw=clamp(down.yaw0-dx*.006,YAW0-1.1,YAW0+1.1);layoutCamera();}
+});
+el.addEventListener('pointerup',e=>{if(!down) return; const tap=!down.moved; down=null; if(tap) tapFire(e.clientX,e.clientY);});
+el.addEventListener('pointercancel',()=>{down=null;});
+function tapFire(px,py){
+  const r=el.getBoundingClientRect();
+  ndc.set(((px-r.left)/r.width)*2-1,-((py-r.top)/r.height)*2+1);
+  raycaster.setFromCamera(ndc,camera);
+  const hits=raycaster.intersectObjects([wallMesh,castleMesh,ground,water],false);
+  if(!hits.length) return;
+  const h=hits[0], pt=h.point.clone().addScaledVector(raycaster.ray.direction,.01);
+  let target;
+  if(h.object===wallMesh&&wallCellOf[h.instanceId]){
+    const w=walls.get(wallCellOf[h.instanceId]);
+    target={kind:'wall',point:new THREE.Vector3(cx(w.x),.5,cz(w.z)),cellKey:wallCellOf[h.instanceId]};
+  }else if(h.object===castleMesh){
+    target={kind:'castle',point:h.point.clone()};
+  }else if(h.object===water){
+    target={kind:'water',point:new THREE.Vector3(h.point.x,-.35,h.point.z)};
+  }else{
+    target={kind:'ground',point:new THREE.Vector3(pt.x,0,pt.z)};
+  }
+  if(autoFire){setAuto(false);toast('Auto fire off. You have the cannons.');}
+  fireAt(target);
+}
+
+/* ===== LOOP ===== */
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000); last=now; clock+=dt;
+  if(autoFire&&!document.hidden){autoTimer-=dt;if(autoTimer<=0){fireAt(randomTarget());autoTimer=rand(.8,1.4);}}
+  updateBalls(dt); updateDebris(dt); updateSmoke(dt); updateFire(dt); updatePiece(dt);
+  for(const c of cannons){c.recoil=Math.max(0,c.recoil-dt*3.5);c.barrel.position.z=-.28*Math.sin(c.recoil*Math.PI/2)*(c.recoil);}
+  flashI*=Math.exp(-dt*13); flash.intensity=flashI;
+  flag.rotation.y=Math.sin(clock*2.2)*.25;
+  for(let i=0;i<wPos.count;i++){const x=wBase[i*2],z=wBase[i*2+1];wPos.setY(i,Math.sin(x*.55+clock*1.1)*.05+Math.cos(z*.7+clock*1.4)*.05);}
+  wPos.needsUpdate=true; waterGeo.computeVertexNormals();
+  shake*=Math.exp(-dt*6);
+  const amp=(reduceMotion?.04:.32)*shake*shake;
+  camera.position.copy(camBase).add(_hv.set(rand(-1,1)*amp,rand(-1,1)*amp,rand(-1,1)*amp));
+  camera.lookAt(camTarget);
+  renderer.render(scene,camera);
+  requestAnimationFrame(frame);
+}
+RING.forEach(([x,z])=>addWall(x,z));
+updateStatus();
+layoutCamera();
+requestAnimationFrame(frame);
+})();
+</script>
